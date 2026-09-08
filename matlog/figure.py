@@ -1,0 +1,83 @@
+"""Turning the panel configuration into matplotlib axes."""
+SURFACE, INK, INK_2 = "#fcfcfb", "#0b0b0b", "#52514e"
+
+
+def place(panels, columns):
+    """Walk the panels left to right, wrapping at the column count.
+
+    A panel marked span takes the whole row, which is what gives layouts like
+    two small plots on top of one wide one.
+    """
+    placements, row, col = [], 0, 0
+    for panel in panels:
+        span = columns if panel.span.get() else 1
+        if col + span > columns:
+            row, col = row + 1, 0
+        placements.append((panel, row, col, span))
+        col += span
+        if col >= columns:
+            row, col = row + 1, 0
+    rows = row + 1 if col else row
+    return placements, max(rows, 1)
+
+
+def bottom_placements(placements):
+    """The placements that sit lowest in every column they cover."""
+    lowest = {}
+    for _panel, row, col, span in placements:
+        for c in range(col, col + span):
+            lowest[c] = max(lowest.get(c, row), row)
+    return {id(panel) for panel, row, col, span in placements
+            if all(lowest[c] == row for c in range(col, col + span))}
+
+
+def draw(figure, placements, rows, columns, series, settings):
+    """Draw every panel. `series` maps a panel to its (label, colour, values) list."""
+    grid = figure.add_gridspec(rows, columns)
+    bottom = bottom_placements(placements)
+    axes, first = {}, None
+    for panel, row, col, span in placements:
+        ax = figure.add_subplot(grid[row, col:col + span],
+                                sharex=first if settings["link_x"] else None)
+        first = first or ax
+        axes[id(panel)] = ax
+        lines = []
+        for label, color, values in series[id(panel)]:
+            lines.append(ax.plot(settings["t"], values, color=color,
+                                 linewidth=settings["linewidth"], label=label)[0])
+        _style(ax, panel, settings)
+        _label_x(ax, panel, settings, id(panel) in bottom)
+        if panel.legend.get() and len(lines) > 1:
+            ax.legend(loc="best", fontsize=8, frameon=False)
+    if settings["title"]:
+        figure.suptitle(settings["title"], x=0.02, ha="left", fontsize=12, color=INK)
+    figure.subplots_adjust(hspace=0.4, wspace=0.24)
+    return axes
+
+
+def _style(ax, panel, settings):
+    ax.set_facecolor(SURFACE)
+    ax.grid(panel.grid.get(), color=INK_2, alpha=0.15, linewidth=0.6)
+    ax.tick_params(colors=INK_2, labelsize=8)
+    ax.axhline(0, color=INK_2, linewidth=0.6, alpha=0.35)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(INK_2)
+        ax.spines[side].set_alpha(0.4)
+    if panel.title.get():
+        ax.set_title(panel.title.get(), loc="left", fontsize=10, color=INK, pad=6)
+    if panel.ylabel.get():
+        ax.set_ylabel(panel.ylabel.get(), fontsize=9, color=INK_2)
+    if not panel.auto_y.get():
+        ax.set_ylim(panel.ymin_value(), panel.ymax_value())
+    if not settings["auto_x"]:
+        ax.set_xlim(settings["xmin"], settings["xmax"])
+
+
+def _label_x(ax, panel, settings, is_bottom):
+    mode = panel.xlabels.get()
+    show = is_bottom if mode == "auto" else mode == "always"
+    ax.tick_params(labelbottom=show)
+    if show:
+        ax.set_xlabel(settings["xlabel"], fontsize=9, color=INK_2)
