@@ -313,7 +313,7 @@ class App(ttk.Frame):
             return
         self.run_ticks = [(run, tk.BooleanVar(value=False)) for run in self.runs]
         self.draw_run_rows()
-        untitled = [run.letter for run in self.runs if not run.description]
+        untitled = [run.name for run in self.runs if not run.description]
         self.status.configure(
             text=f"{len(self.runs)} runs in {folder}"
                  + (f"; no {runs_module.VALUES_FILE} line for {', '.join(untitled)}"
@@ -425,7 +425,7 @@ class App(ttk.Frame):
             self.single_layout = ([c.state() for c in self.channels],
                                   [p.state() for p in self.panels])
         self.overlay = (chosen, signals)
-        self.title.set("Runs " + ", ".join(run.letter for run in chosen))
+        self.title.set("Runs " + ", ".join(run.name for run in chosen))
         if self.merge_signals.get():
             self._resize_panels(1)
             self.panels[0].title.set(merged_title(signals))
@@ -659,7 +659,7 @@ class App(ttk.Frame):
             matrix = self.run_matrices[run.path]
             needed = max([c.index for c in signals] + ([index] if index is not None else []))
             if needed >= matrix.shape[0]:
-                raise ValueError(f"run {run.letter} has only {matrix.shape[0]} channels, "
+                raise ValueError(f"run {run.name} has only {matrix.shape[0]} channels, "
                                  f"channel {needed} was asked for")
             t = np.arange(matrix.shape[1], dtype=float) if index is None else matrix[index]
             for order, channel in enumerate(signals):
@@ -674,7 +674,7 @@ class App(ttk.Frame):
             return
         self.status.configure(
             text=f"{len(chosen)} runs \u00d7 {len(signals)} signals: "
-                 + ", ".join(run.letter for run in chosen),
+                 + ", ".join(run.name for run in chosen),
             foreground=INK_2)
 
     def _render(self, series):
