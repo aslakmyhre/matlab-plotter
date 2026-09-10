@@ -19,6 +19,8 @@ HELI_PRESET = [("Time", "s"), ("Travel", "rad"), ("Travel rate", "rad/s"),
                ("Pitch", "rad"), ("Pitch rate", "rad/s"),
                ("Elevation", "rad"), ("Elevation rate", "rad/s")]
 MAX_PANELS = 16
+# Starting width of the settings pane; the sash moves it from there.
+TABS_WIDTH = 660
 
 
 def merged_title(signals):
@@ -36,7 +38,7 @@ class App(ttk.Frame):
         master.rowconfigure(0, weight=1)
         master.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
-        self.columnconfigure(1, weight=1)
+        self.columnconfigure(0, weight=1)
 
         self.arrays = {}
         self.path = None
@@ -54,8 +56,11 @@ class App(ttk.Frame):
         self.current_run = None
 
         self._make_variables()
+        self.split = ttk.PanedWindow(self, orient="horizontal")
+        self.split.grid(row=0, column=0, sticky="nsew")
         self._build_tabs()
         self._build_figure()
+        self.split.bind("<Map>", self._place_sash)
         self.bind_all("<Return>", lambda _e: self.draw())
         if self.runs_folder.get():
             self.scan_runs()
@@ -81,9 +86,8 @@ class App(ttk.Frame):
     # ---------- window ----------
 
     def _build_tabs(self):
-        book = ttk.Notebook(self, width=660)
-        book.grid(row=0, column=0, sticky="ns", padx=(0, 8))
-        book.grid_propagate(False)
+        book = ttk.Notebook(self.split, width=TABS_WIDTH)
+        self.split.add(book, weight=0)
         for builder, title in ((self._tab_source, "Source"), (self._tab_runs, "Runs"),
                                (self._tab_signals, "Signals"), (self._tab_panels, "Panels"),
                                (self._tab_figure, "Figure")):
@@ -94,11 +98,20 @@ class App(ttk.Frame):
             book.add(frame, text=title)
         self.status = ttk.Label(self, text="Open a .mat file to start.", foreground=INK_2,
                                 wraplength=600, justify="left")
-        self.status.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.status.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+
+    def _place_sash(self, _event):
+        """Start the sash at the tabs' usual width, once the panes are on screen.
+
+        Before that the paned window has no size to divide. From here the sash
+        belongs to the user, so this runs only once.
+        """
+        self.split.unbind("<Map>")
+        self.split.sashpos(0, TABS_WIDTH)
 
     def _build_figure(self):
-        holder = ttk.Frame(self)
-        holder.grid(row=0, column=1, sticky="nsew")
+        holder = ttk.Frame(self.split, padding=(8, 0, 0, 0))
+        self.split.add(holder, weight=1)
         holder.rowconfigure(0, weight=1)
         holder.columnconfigure(0, weight=1)
         self.figure = Figure(figsize=(9, 7.5), facecolor=SURFACE)
