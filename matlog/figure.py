@@ -1,4 +1,10 @@
 """Turning the panel configuration into matplotlib axes."""
+from collections import namedtuple
+
+# One plotted line. Each carries its own time vector: overlaid runs are separate
+# logs and rarely share a sample count.
+Series = namedtuple("Series", "label color style t values")
+
 SURFACE, INK, INK_2 = "#fcfcfb", "#0b0b0b", "#52514e"
 
 
@@ -32,7 +38,7 @@ def bottom_placements(placements):
 
 
 def draw(figure, placements, rows, columns, series, settings):
-    """Draw every panel. `series` maps a panel to its (label, colour, values) list."""
+    """Draw every panel. `series` maps a panel to its list of Series."""
     grid = figure.add_gridspec(rows, columns)
     bottom = bottom_placements(placements)
     axes, first = {}, None
@@ -42,9 +48,9 @@ def draw(figure, placements, rows, columns, series, settings):
         first = first or ax
         axes[id(panel)] = ax
         lines = []
-        for label, color, values in series[id(panel)]:
-            lines.append(ax.plot(settings["t"], values, color=color,
-                                 linewidth=settings["linewidth"], label=label)[0])
+        for line in series[id(panel)]:
+            lines.append(ax.plot(line.t, line.values, color=line.color, linestyle=line.style,
+                                 linewidth=settings["linewidth"], label=line.label)[0])
         _style(ax, panel, settings)
         _label_x(ax, panel, settings, id(panel) in bottom)
         if panel.legend.get() and len(lines) > 1:

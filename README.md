@@ -60,6 +60,30 @@ uv run --with-requirements requirements.txt mat_plotter.py [file.mat]
 
 Or activate the venv first (`source .venv/bin/activate`) and just use `python mat_plotter.py`.
 
+## A folder of runs
+
+The **Runs** tab reads a folder of logs named `…run<letter>.mat` alongside a `values.md`
+that titles them, one line per run:
+
+```
+C: p1=-1 p2=-2
+G: p1=-20 p2=-25
+L: p1=-3+5i p2=-3-5i
+```
+
+A folder named `runs/` next to the app is picked up on start; any other folder can be
+chosen. Each run gets a line in the tab:
+
+- **▶** shows that run on its own, titling the figure `Run G — p1=-20 p2=-25`. Stepping
+  from one run to the next keeps the names, panels and expressions already set up.
+- the **tick box** includes the run in an overlay. *Overlay ticked runs* draws one panel
+  per ticked signal, one line per run, each labelled with its `values.md` line. Runs of
+  different lengths are fine — every line carries its own time vector.
+- **Merge signals into one panel** puts every line in a single panel instead: colour is
+  the run, dash pattern is the signal.
+
+A run with no line in `values.md` is still listed, and says so.
+
 ## tkinter per platform
 
 tkinter is not installable from pip — it comes from the OS or the Python build.
@@ -78,3 +102,23 @@ Check it:
 ```bash
 python3 -c "import tkinter; print('ok')"
 ```
+
+## Windows .exe (no internet needed on the target machine)
+
+`mat_plotter.spec` builds a single `MatLogPlotter.exe` that bundles Python, tkinter,
+numpy, scipy and matplotlib. Copy the file onto the target machine and double-click it —
+no installer, no Python, no network.
+
+PyInstaller cannot cross-compile, so the exe must be produced **on Windows**. Two ways:
+
+**On a Windows machine** (needs internet once, for pip):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-windows.ps1
+```
+
+Output: `dist\MatLogPlotter.exe`.
+
+**Via GitHub Actions**, if you have no Windows machine: run the *Build Windows exe*
+workflow (Actions tab → Run workflow, or push a `v*` tag) and download the
+`MatLogPlotter-windows` artifact.

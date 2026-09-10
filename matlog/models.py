@@ -4,6 +4,8 @@ import tkinter as tk
 # Fixed categorical order, validated for colourblind separation.
 PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100",
            "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
+# Merged panels colour by run, so the dash pattern is what separates the signals.
+LINESTYLES = ["-", "--", ":", "-."]
 
 HIDDEN = "hidden"
 XLABEL_MODES = ["auto", "always", "never"]
@@ -18,6 +20,10 @@ def parse_float(text, field):
 
 def palette_color(position):
     return PALETTE[position % len(PALETTE)]
+
+
+def line_style(position):
+    return LINESTYLES[position % len(LINESTYLES)]
 
 
 class Channel:
