@@ -1,11 +1,17 @@
 """Turning the panel configuration into matplotlib axes."""
 from collections import namedtuple
 
+import matplotlib.colors as mcolors
+
 # One plotted line. Each carries its own time vector: overlaid runs are separate
 # logs and rarely share a sample count.
 Series = namedtuple("Series", "label color style t values")
 
 SURFACE, INK, INK_2 = "#fcfcfb", "#0b0b0b", "#52514e"
+
+_COLOUR_ACCESSORS = (("get_color", "set_color"),
+                     ("get_edgecolor", "set_edgecolor"),
+                     ("get_facecolor", "set_facecolor"))
 
 
 def place(panels, columns):
@@ -87,3 +93,41 @@ def _label_x(ax, panel, settings, is_bottom):
     ax.tick_params(labelbottom=show)
     if show:
         ax.set_xlabel(settings["xlabel"], fontsize=9, color=INK_2)
+
+
+def flatten_alpha(figure, background):
+    """Blend every artist's alpha into its own colours, over `background`.
+
+    PostScript has no alpha channel, so an EPS export would otherwise draw the
+    grid, the zero line and the spines fully opaque. Returns a callable that
+    puts the original colours back once the file is written.
+    """
+    base = mcolors.to_rgb(background)
+    restore = []
+    for artist in figure.findobj():
+        alpha = artist.get_alpha()
+        if alpha is None or alpha >= 1:
+            continue
+        for getter, setter in _COLOUR_ACCESSORS:
+            read = getattr(artist, getter, None)
+            if read is None:
+                continue
+            colour = read()
+            if not mcolors.is_color_like(colour):
+                continue
+            write = getattr(artist, setter)
+            restore.append((write, colour))
+            write(_over(colour, alpha, base))
+        restore.append((artist.set_alpha, alpha))
+        artist.set_alpha(None)
+
+    def undo():
+        for write, value in reversed(restore):
+            write(value)
+
+    return undo
+
+
+def _over(colour, alpha, base):
+    return tuple(alpha * c + (1 - alpha) * b
+                 for c, b in zip(mcolors.to_rgb(colour), base))

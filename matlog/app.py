@@ -715,10 +715,18 @@ class App(ttk.Frame):
             return
         path = filedialog.asksaveasfilename(
             defaultextension=".png",
-            filetypes=[("PNG image", "*.png"), ("PDF", "*.pdf"), ("SVG", "*.svg")])
+            filetypes=[("PNG image", "*.png"), ("PDF", "*.pdf"), ("SVG", "*.svg"),
+                       ("EPS", "*.eps")])
         if not path:
             return
-        self.figure.savefig(path, dpi=160, bbox_inches="tight", facecolor=SURFACE)
+        undo = (figure_builder.flatten_alpha(self.figure, SURFACE)
+                if path.lower().endswith(".eps") else None)
+        try:
+            self.figure.savefig(path, dpi=160, bbox_inches="tight", facecolor=SURFACE)
+        finally:
+            if undo:
+                undo()
+                self.canvas.draw_idle()
         self.status.configure(text=f"saved {path}", foreground=INK_2)
 
     def export_csv(self):
