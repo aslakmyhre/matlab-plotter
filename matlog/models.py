@@ -1,4 +1,5 @@
-"""The editable objects behind the Signals and Panels tabs."""
+"""The editable objects behind the Signals, Panels and Lines tabs."""
+import itertools
 import tkinter as tk
 
 # Fixed categorical order, validated for colourblind separation.
@@ -7,7 +8,11 @@ PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100",
 # Merged panels colour by run, so the dash pattern is what separates the signals.
 LINESTYLES = ["-", "--", ":", "-."]
 
+# What the Lines tab offers, as matplotlib line styles. "auto" leaves the choice to the view.
+LINE_STYLES = {"auto": None, "solid": "-", "dashed": "--", "dotted": ":", "dash-dot": "-."}
+
 HIDDEN = "hidden"
+_channel_ids = itertools.count()
 XLABEL_MODES = ["auto", "always", "never"]
 
 
@@ -31,6 +36,8 @@ class Channel:
 
     def __init__(self, name, color, index=None, expression="", unit="", panel="1"):
         self.index = index
+        # Stable across renames and reorders, so a line's legend and style stay with it.
+        self.uid = next(_channel_ids)
         self.name = tk.StringVar(value=name)
         self.unit = tk.StringVar(value=unit)
         self.expression = tk.StringVar(value=expression)
@@ -68,6 +75,34 @@ class Channel:
         for key in ("name", "unit", "expression", "scale", "offset", "color", "panel"):
             getattr(self, key).set(state[key])
         self.shown_label = self.label()
+
+
+class LineLook:
+    """The legend text and style the user gave one plotted line.
+
+    The text starts as the automatic label and keeps following it until edited, so
+    renaming a signal still reaches legends nobody has touched.
+    """
+
+    def __init__(self, auto_label=None, label="", style="auto"):
+        self.auto_label = auto_label
+        self.label = tk.StringVar(value=auto_label if auto_label is not None else label)
+        self.style = tk.StringVar(value=style)
+
+    def edited(self):
+        return self.label.get() != self.auto_label or self.style.get() != "auto"
+
+    def resolve(self, auto_label, auto_style):
+        """(legend text, matplotlib style) for this draw."""
+        # Writing only on a real change keeps the variable trace from redrawing forever.
+        if auto_label != self.auto_label and self.label.get() == self.auto_label:
+            self.label.set(auto_label)
+        self.auto_label = auto_label
+        return self.label.get(), LINE_STYLES[self.style.get()] or auto_style
+
+    def reset(self):
+        self.label.set(self.auto_label or "")
+        self.style.set("auto")
 
 
 class Panel:

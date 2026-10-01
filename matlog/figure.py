@@ -4,8 +4,9 @@ from collections import namedtuple
 import matplotlib.colors as mcolors
 
 # One plotted line. Each carries its own time vector: overlaid runs are separate
-# logs and rarely share a sample count.
-Series = namedtuple("Series", "label color style t values")
+# logs and rarely share a sample count. `label` names the line on hover; `legend` is
+# what the legend shows, empty to leave the line out of it.
+Series = namedtuple("Series", "label legend color style t values")
 
 SURFACE, INK, INK_2 = "#fcfcfb", "#0b0b0b", "#52514e"
 
@@ -53,13 +54,12 @@ def draw(figure, placements, rows, columns, series, settings):
                                 sharex=first if settings["link_x"] else None)
         first = first or ax
         axes[id(panel)] = ax
-        lines = []
         for line in series[id(panel)]:
-            lines.append(ax.plot(line.t, line.values, color=line.color, linestyle=line.style,
-                                 linewidth=settings["linewidth"], label=line.label)[0])
+            ax.plot(line.t, line.values, color=line.color, linestyle=line.style,
+                    linewidth=settings["linewidth"], label=line.legend or "_nolegend_")
         _style(ax, panel, settings)
         _label_x(ax, panel, settings, id(panel) in bottom)
-        if panel.legend.get() and len(lines) > 1:
+        if panel.legend.get() and any(line.legend for line in series[id(panel)]):
             ax.legend(loc="best", fontsize=8, frameon=False)
     if settings["title"]:
         figure.suptitle(settings["title"], x=0.02, ha="left", fontsize=12, color=INK)

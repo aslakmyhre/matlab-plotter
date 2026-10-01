@@ -81,6 +81,15 @@ be chosen. Runs are named by their path below that folder, e.g. `day2/data_2-1-3
 
 Edits in the Signals, Panels and Figure tabs redraw on their own once you stop typing.
 
+## Legends and line styles
+
+The **Lines** tab lists every plotted line under its panel, with a Legend box per panel.
+Each line's legend text starts as the automatic label (signal name and unit for one run,
+the run's path when runs are overlaid) and follows renames until you edit it. Clear the
+text to leave a line out of the legend. The style menu sets a line solid, dashed, dotted
+or dash-dot; *auto* keeps the view's own choice. Lines of a single run keep their legend
+and style while stepping through runs, and **Save settings…** stores them.
+
 ## Signal names
 
 A Simulink *To File* log holds only numbers: row 0 is time, then one row per Mux input,

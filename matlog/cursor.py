@@ -63,7 +63,7 @@ class Crosshair:
                 highlight.set_color(chosen.color)
                 highlight.set_linestyle(chosen.style)
                 tag.xy = (x, y)
-                tag.set_text(f"{chosen.label}\n{y:.4g} at t = {x:.4g}")
+                tag.set_text(f"{chosen.legend or chosen.label}\n{y:.4g} at t = {x:.4g}")
                 ax.draw_artist(highlight)
                 ax.draw_artist(tag)
         self.canvas.blit(self.canvas.figure.bbox)

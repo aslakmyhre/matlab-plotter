@@ -12,8 +12,8 @@ from . import (data, expressions, figure as figure_builder, names as names_modul
                runs as runs_module, store)
 from .cursor import Crosshair
 from .figure import INK, INK_2, SURFACE
-from .models import (HIDDEN, XLABEL_MODES, Channel, Panel, line_style, palette_color,
-                     parse_float)
+from .models import (HIDDEN, LINE_STYLES, XLABEL_MODES, Channel, LineLook, Panel, line_style,
+                     palette_color, parse_float)
 from .widgets import labelled_entry, scrollable, scrolling_tree
 
 MAX_PANELS = 16
@@ -74,6 +74,14 @@ class App(ttk.Frame):
         self.current_run = None
         self._pending_draw = None
         self._pending_select = None
+        # Legend text and style per line, keyed by (run path, channel uid). The single-run
+        # view uses "" for the run, so the looks carry over while stepping through runs.
+        self.line_looks = {}
+        # (panel, look, colour) for every line in the figure, in drawing order.
+        self.drawn_lines = []
+        # What the Lines tab rows were built for, so typing in them does not rebuild them.
+        self.line_rows_shown = None
+        self.line_swatches = {}
 
         self._make_variables()
         self.split = ttk.PanedWindow(self, orient="horizontal")
@@ -137,7 +145,7 @@ class App(ttk.Frame):
         self.split.add(book, weight=0)
         for builder, title in ((self._tab_source, "Source"), (self._tab_runs, "Runs"),
                                (self._tab_signals, "Signals"), (self._tab_panels, "Panels"),
-                               (self._tab_figure, "Figure")):
+                               (self._tab_lines, "Lines"), (self._tab_figure, "Figure")):
             frame = ttk.Frame(book, padding=6)
             frame.columnconfigure(0, weight=1)
             frame.rowconfigure(1, weight=1)
@@ -291,6 +299,15 @@ class App(ttk.Frame):
         holder, self.panel_frame = scrollable(frame)
         holder.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
 
+    def _tab_lines(self, frame):
+        head = ttk.Frame(frame)
+        head.grid(row=0, column=0, sticky="ew")
+        ttk.Button(head, text="Reset all", command=self.reset_lines).pack(side="left")
+        ttk.Label(head, text="Every plotted line. Empty text leaves a line out of the legend.",
+                  foreground=INK_2).pack(side="left", padx=8)
+        holder, self.line_frame = scrollable(frame)
+        holder.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+
     def _tab_figure(self, frame):
         box = ttk.LabelFrame(frame, text="Figure", padding=6)
         box.grid(row=0, column=0, sticky="ew")
@@ -369,6 +386,8 @@ class App(ttk.Frame):
 
         self.channels = [Channel(f"Signal {i}", palette_color(i), index=i)
                          for i in range(matrix.shape[0])]
+        # Looks belong to the channels just replaced.
+        self.line_looks = {}
         for channel in self.channels:
             self._adopt(channel)
         self.refresh_time_sources()
@@ -469,7 +488,8 @@ class App(ttk.Frame):
     def step_run(self, forward):
         """Move to the next run in the list, skipping folders."""
         order = self._tree_order()
-        focus = self.run_tree.focus()
+        # Selections made by the buttons or the filter leave no focus; start from them.
+        focus = self.run_tree.focus() or next(iter(self.run_tree.selection()), "")
         if focus in order:
             position = order.index(focus)
             ahead = order[position + 1:] if forward else reversed(order[:position])
@@ -907,6 +927,7 @@ class App(ttk.Frame):
             self._pending_draw = None
         self.figure.clear()
         self.crosshair.attach([])
+        self.drawn_lines = []
         if not self.channels:
             self.canvas.draw()
             return
@@ -924,8 +945,9 @@ class App(ttk.Frame):
             if channel.panel.get() == HIDDEN:
                 continue
             panel = self.panels[int(channel.panel.get()) - 1]
-            series[id(panel)].append(figure_builder.Series(
-                channel.label(), channel.color.get(), "-", t, values[id(channel)]))
+            series[id(panel)].append(self._line(
+                panel, ("", channel.uid), channel.label(), channel.color.get(), "-",
+                t, values[id(channel)]))
         drawn = self._render(series)
         if not drawn:
             return
@@ -958,8 +980,9 @@ class App(ttk.Frame):
                     label = f"{run.label} \u00b7 {channel.name.get()}" if merged else run.label
                     color = palette_color(position)
                     style = line_style(order) if merged else "-"
-                series[id(panel)].append(figure_builder.Series(
-                    label, color, style, t, channel.transform(matrix[channel.index])))
+                key = ("" if single else run.path, channel.uid)
+                series[id(panel)].append(self._line(
+                    panel, key, label, color, style, t, channel.transform(matrix[channel.index])))
         drawn = self._render(series)
         if not drawn:
             return
@@ -986,7 +1009,59 @@ class App(ttk.Frame):
         axes = figure_builder.draw(self.figure, placements, rows, columns, series, settings)
         self.crosshair.attach([(axes[id(p)], series[id(p)]) for p in drawn],
                               settings["linewidth"])
+        self.refresh_line_rows()
         return drawn
+
+    def _line(self, panel, key, auto_label, color, auto_style, t, values):
+        """One Series, with whatever legend text and style the user gave this line."""
+        look = self.line_looks.get(key)
+        if look is None:
+            look = self.line_looks[key] = LineLook(auto_label)
+            self._watch((look.label, look.style))
+        legend, style = look.resolve(auto_label, auto_style)
+        self.drawn_lines.append((panel, look, color))
+        return figure_builder.Series(auto_label, legend, color, style, t, values)
+
+    def refresh_line_rows(self):
+        """One row per plotted line in the Lines tab, under its panel."""
+        layout = [(id(panel), id(look)) for panel, look, _color in self.drawn_lines]
+        if layout == self.line_rows_shown:
+            for _panel, look, color in self.drawn_lines:
+                self.line_swatches[id(look)].configure(background=color)
+            return
+        self.line_rows_shown = layout
+        for widget in self.line_frame.winfo_children():
+            widget.destroy()
+        self.line_swatches = {}
+        self.line_frame.columnconfigure(1, weight=1)
+        row = 0
+        for panel in self.panels:
+            lines = [(look, color) for drawn, look, color in self.drawn_lines if drawn is panel]
+            if not lines:
+                continue
+            head = ttk.Frame(self.line_frame)
+            head.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8 if row else 0, 2))
+            ttk.Label(head, text=f"Panel {panel.number}", foreground=INK_2).pack(side="left")
+            ttk.Label(head, textvariable=panel.title).pack(side="left", padx=6)
+            ttk.Checkbutton(head, text="Legend", variable=panel.legend,
+                            command=self.draw).pack(side="right")
+            row += 1
+            for look, color in lines:
+                swatch = tk.Label(self.line_frame, background=color, width=2)
+                swatch.grid(row=row, column=0, padx=(0, 4), pady=1)
+                self.line_swatches[id(look)] = swatch
+                ttk.Entry(self.line_frame, textvariable=look.label).grid(
+                    row=row, column=1, sticky="ew", pady=1)
+                style = ttk.Combobox(self.line_frame, textvariable=look.style,
+                                     values=list(LINE_STYLES), width=8, state="readonly")
+                style.grid(row=row, column=2, padx=(4, 0), pady=1)
+                style.bind("<<ComboboxSelected>>", lambda _e: self.draw())
+                row += 1
+
+    def reset_lines(self):
+        for _panel, look, _color in self.drawn_lines:
+            look.reset()
+        self.draw()
 
     def toggle_crosshair(self):
         self.crosshair.enabled = self.crosshair_on.get()
@@ -1048,7 +1123,15 @@ class App(ttk.Frame):
                     auto_x=self.auto_x.get(), xmin=self.xmin.get(), xmax=self.xmax.get(),
                     link_x=self.link_x.get(), crosshair=self.crosshair_on.get(),
                     channels=[c.state() for c in self.channels],
-                    panels=[p.state() for p in self.panels])
+                    panels=[p.state() for p in self.panels],
+                    lines=self._line_states())
+
+    def _line_states(self):
+        """The single-run lines given their own legend or style, by signal position."""
+        position = {c.uid: i for i, c in enumerate(self.channels)}
+        return [dict(signal=position[uid], label=look.label.get(), style=look.style.get())
+                for (run, uid), look in self.line_looks.items()
+                if run == "" and uid in position and look.edited()]
 
     def save_settings(self):
         path = filedialog.asksaveasfilename(defaultextension=".json",
@@ -1093,6 +1176,12 @@ class App(ttk.Frame):
         for channel, saved in zip(self.channels, state["channels"]):
             channel.restore(saved)
             self._adopt(channel)
+        self.line_looks = {}
+        # Settings saved before legends could be edited have no "lines".
+        for saved in state.get("lines", []):
+            look = LineLook(label=saved["label"], style=saved["style"])
+            self._watch((look.label, look.style))
+            self.line_looks[("", self.channels[saved["signal"]].uid)] = look
 
         self.refresh_time_sources()
         self.time_source.set(state["time_source"])
