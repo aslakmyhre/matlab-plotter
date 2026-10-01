@@ -62,27 +62,38 @@ Or activate the venv first (`source .venv/bin/activate`) and just use `python ma
 
 ## A folder of runs
 
-The **Runs** tab reads a folder of logs named `…run<letter>.mat` alongside a `values.md`
-that titles them, one line per run:
+The **Runs** tab lists every `.mat` log below a chosen folder, subfolders included, as a
+tree. A folder named `runs/` next to the app is picked up on start; any other folder can
+be chosen. Runs are named by their path below that folder, e.g. `day2/data_2-1-3-runC`.
 
-```
-C: p1=-1 p2=-2
-G: p1=-20 p2=-25
-L: p1=-3+5i p2=-3-5i
-```
-
-A folder named `runs/` next to the app is picked up on start; any other folder can be
-chosen. Each run gets a line in the tab:
-
-- **▶** shows that run on its own, titling the figure `Run G — p1=-20 p2=-25`. Stepping
-  from one run to the next keeps the names, panels and expressions already set up.
-- the **tick box** includes the run in an overlay. *Overlay ticked runs* draws one panel
-  per ticked signal, one line per run, each labelled with its `values.md` line. Runs of
+- **Click a run** to plot it on its own. Moving from one run to the next keeps the names,
+  panels and expressions already set up. **Up/Down** steps through the runs.
+- **Select several** (ctrl/⌘-click, shift-click, or click a folder for every run in it)
+  and they are overlaid: one panel per selected signal, one line per run. Runs of
   different lengths are fine — every line carries its own time vector.
+- **Signals to overlay** starts as whatever is plotted for the single run; change the
+  selection to pick others.
+- **Filter** narrows the list to runs whose path contains the text.
+- **All / None / Invert** under each list change the selection in one go.
+- **Hover a line** to highlight it and see which run (and, merged, which signal) it is.
 - **Merge signals into one panel** puts every line in a single panel instead: colour is
   the run, dash pattern is the signal.
 
-A run with no line in `values.md` is still listed, and says so.
+Edits in the Signals, Panels and Figure tabs redraw on their own once you stop typing.
+
+## Signal names
+
+A Simulink *To File* log holds only numbers: row 0 is time, then one row per Mux input,
+with no names. Name the signals in the **Signals** tab at any time, then **Save names…**
+writes them to a `signals.json`. A log picks up the `signals.json` in its own folder or
+the nearest folder above it, so one file in `LQR med integral/` names every run below it,
+while a subfolder logged another way can carry its own. A file listing a different
+number of signals than the log has is not applied, and the Signals tab says why.
+**Load names…** applies any names file by hand.
+
+```json
+{"signals": [{"name": "Time", "unit": "s"}, {"name": "Travel", "unit": "rad"}]}
+```
 
 ## tkinter per platform
 

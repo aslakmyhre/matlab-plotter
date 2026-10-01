@@ -38,6 +38,8 @@ class Channel:
         self.offset = tk.StringVar(value="0")
         self.color = tk.StringVar(value=color)
         self.panel = tk.StringVar(value=panel)
+        # The label panels were last told about, so a rename can find the titles to update.
+        self.shown_label = self.label()
 
     @property
     def derived(self):
@@ -52,6 +54,10 @@ class Channel:
         offset = parse_float(self.offset.get(), f"{self.name.get()} offset")
         return raw * scale + offset
 
+    def variables(self):
+        return (self.name, self.unit, self.expression, self.scale, self.offset,
+                self.color, self.panel)
+
     def state(self):
         return dict(index=self.index, name=self.name.get(), unit=self.unit.get(),
                     expression=self.expression.get(), scale=self.scale.get(),
@@ -61,6 +67,7 @@ class Channel:
         self.index = state["index"]
         for key in ("name", "unit", "expression", "scale", "offset", "color", "panel"):
             getattr(self, key).set(state[key])
+        self.shown_label = self.label()
 
 
 class Panel:
@@ -73,7 +80,7 @@ class Panel:
         self.auto_y = tk.BooleanVar(value=True)
         self.ymin = tk.StringVar(value="")
         self.ymax = tk.StringVar(value="")
-        self.legend = tk.BooleanVar(value=True)
+        self.legend = tk.BooleanVar(value=False)
         self.grid = tk.BooleanVar(value=True)
         self.span = tk.BooleanVar(value=False)
         self.xlabels = tk.StringVar(value="auto")
@@ -83,6 +90,10 @@ class Panel:
 
     def ymax_value(self):
         return parse_float(self.ymax.get(), f"Panel {self.number} y max")
+
+    def variables(self):
+        return (self.title, self.ylabel, self.auto_y, self.ymin, self.ymax,
+                self.legend, self.grid, self.span, self.xlabels)
 
     def state(self):
         return dict(title=self.title.get(), ylabel=self.ylabel.get(),

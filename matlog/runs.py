@@ -1,70 +1,42 @@
-"""The runs/ folder: one .mat log per run, titled by the values.md table."""
+"""A folder of runs: every .mat log below it, subfolders included."""
 import os
 import re
 
-VALUES_FILE = "values.md"
-# data_2-1-3-runG.mat -> G. A log named any other way keeps its own file name.
-LETTER_PATTERN = re.compile(r"run([A-Za-z0-9]+)\.mat$", re.IGNORECASE)
-# "G: p1=-20 p2=-25", with or without a list marker in front.
-ENTRY_PATTERN = re.compile(r"^\s*(?:[-*]\s*)?([A-Za-z0-9]+)\s*:\s*(\S.*?)\s*$")
+RUN_EXTENSION = ".mat"
 
 
 class Run:
-    """One log file and the line values.md holds for it."""
+    """One log file, named by its path below the chosen folder."""
 
-    def __init__(self, name, path, description):
-        self.name = name
+    def __init__(self, path, root):
         self.path = path
-        self.description = description
+        relative = os.path.relpath(path, root)
+        # "/" on every platform, so labels read the same on Windows. "" is the root itself.
+        self.folder = os.path.dirname(relative).replace(os.sep, "/")
+        self.name = os.path.splitext(os.path.basename(relative))[0]
+        self.label = f"{self.folder}/{self.name}" if self.folder else self.name
 
-    def title(self):
-        head = self.name if self.name.lower().startswith("run") else f"Run {self.name}"
-        return head + (f" — {self.description}" if self.description else "")
-
-    def legend_label(self):
-        return f"{self.name}: {self.description}" if self.description else self.name
-
-    def listing(self):
-        return f"{self.name:<3} {self.description or f'(no line in {VALUES_FILE})'}"
-
-
-def read_values(folder):
-    """The values.md table as {run name: description}, empty when there is no table.
-
-    The table only titles the runs, so a folder without one still plots.
-    """
-    path = os.path.join(folder, VALUES_FILE)
-    if not os.path.exists(path):
-        return {}
-    with open(path, encoding="utf-8") as handle:
-        entries = {}
-        for line in handle:
-            match = ENTRY_PATTERN.match(line)
-            if match:
-                entries[match.group(1).upper()] = match.group(2)
-    if not entries:
-        raise ValueError(f"{path} holds no '<letter>: <values>' lines")
-    return entries
-
-
-def run_name(filename):
-    """The letter of a ...run<letter>.mat log, else the file name without .mat."""
-    match = LETTER_PATTERN.search(filename)
-    return match.group(1).upper() if match else os.path.splitext(filename)[0]
+    def matches(self, text):
+        return text.lower() in self.label.lower()
 
 
 def sort_key(name):
-    """Runs in file-name order, with digit groups compared as numbers."""
+    """File-name order, with digit groups compared as numbers."""
     return [(int(part), "") if part.isdigit() else (0, part.lower())
             for part in re.split(r"(\d+)", name)]
 
 
-def discover(folder):
-    """Every .mat log in the folder, in name order, titled from values.md."""
-    entries = read_values(folder)
-    runs = [Run(name, os.path.join(folder, filename), entries.get(name.upper()))
-            for filename in os.listdir(folder) if filename.lower().endswith(".mat")
-            for name in [run_name(filename)]]
+def discover(root):
+    """Every .mat log below root, folder by folder, in name order."""
+    if not os.path.isdir(root):
+        raise ValueError(f"{root!r} is not a folder")
+    runs = []
+    for folder, subfolders, files in os.walk(root):
+        # Hidden folders hold tool state (.git, .venv), never logs.
+        subfolders[:] = sorted((d for d in subfolders if not d.startswith(".")), key=sort_key)
+        runs.extend(Run(os.path.join(folder, name), root)
+                    for name in sorted(files, key=sort_key)
+                    if name.lower().endswith(RUN_EXTENSION))
     if not runs:
-        raise ValueError(f"{folder} holds no .mat files")
-    return sorted(runs, key=lambda run: sort_key(run.name))
+        raise ValueError(f"{root} holds no {RUN_EXTENSION} files, subfolders included")
+    return runs

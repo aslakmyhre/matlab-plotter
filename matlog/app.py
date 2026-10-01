@@ -1,5 +1,6 @@
 """The MAT log plotter window."""
 import os
+import posixpath
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
@@ -7,20 +8,23 @@ import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
-from . import data, expressions, figure as figure_builder, runs as runs_module, store
+from . import (data, expressions, figure as figure_builder, names as names_module,
+               runs as runs_module, store)
 from .cursor import Crosshair
 from .figure import INK, INK_2, SURFACE
 from .models import (HIDDEN, XLABEL_MODES, Channel, Panel, line_style, palette_color,
                      parse_float)
-from .widgets import labelled_entry, scrollable
+from .widgets import labelled_entry, scrollable, scrolling_tree
 
-# Outport order of the "Heli 3D" subsystem in init/heli_q8.slx.
-HELI_PRESET = [("Time", "s"), ("Travel", "rad"), ("Travel rate", "rad/s"),
-               ("Pitch", "rad"), ("Pitch rate", "rad/s"),
-               ("Elevation", "rad"), ("Elevation rate", "rad/s")]
 MAX_PANELS = 16
 # Starting width of the settings pane; the sash moves it from there.
 TABS_WIDTH = 660
+# Edits redraw on their own once typing pauses this long.
+DRAW_DELAY_MS = 400
+# Holding an arrow key in the run list loads only the run it stops on.
+SELECT_DELAY_MS = 120
+ERROR = "#e34948"
+FOLDER_PREFIX = "dir:"
 
 
 def merged_title(signals):
@@ -29,6 +33,13 @@ def merged_title(signals):
     unit = units.pop() if len(units) == 1 else ""
     names = " \u00b7 ".join(c.name.get() for c in signals)
     return f"{names}  [{unit}]" if unit else names
+
+
+def overlay_title(chosen):
+    """How many runs, and the deepest folder holding all of them."""
+    # Run folders always use "/", so posixpath splits them on every platform.
+    shared = posixpath.commonpath([run.folder for run in chosen])
+    return f"{len(chosen)} runs in {shared}" if shared else f"{len(chosen)} runs"
 
 
 class App(ttk.Frame):
@@ -42,18 +53,27 @@ class App(ttk.Frame):
 
         self.arrays = {}
         self.path = None
+        # The signals.json the signal names came from, None when typed or defaulted.
+        self.names_path = None
         self.channels = []
         self.panels = []
         self.applied_orientation = "rows"
         self.runs = []
-        self.run_ticks = []
-        self.signal_ticks = []
+        # Tree item id -> Run, for the runs the filter lets through.
+        self.run_items = {}
+        # Paths of the runs plotted from the run list, so a repeated selection is a no-op.
+        self.shown_runs = ()
         # Set while several runs are plotted together: (runs, channels overlaid).
         self.overlay = None
+        # What the overlay panels were laid out for: (channel indices, merged).
+        self.overlay_layout = None
+        # Matrices of the overlaid runs, by path, so adding one run loads only that run.
         self.run_matrices = {}
         # The panel layout in use before that, so one run can be shown again.
         self.single_layout = None
         self.current_run = None
+        self._pending_draw = None
+        self._pending_select = None
 
         self._make_variables()
         self.split = ttk.PanedWindow(self, orient="horizontal")
@@ -62,6 +82,8 @@ class App(ttk.Frame):
         self._build_figure()
         self.split.bind("<Map>", self._place_sash)
         self.bind_all("<Return>", lambda _e: self.draw())
+        self._watch((self.title, self.xlabel, self.linewidth, self.xmin, self.xmax,
+                     self.columns))
         if self.runs_folder.get():
             self.scan_runs()
 
@@ -82,6 +104,31 @@ class App(ttk.Frame):
         self.merge_signals = tk.BooleanVar(value=False)
         default = os.path.join(os.getcwd(), "runs")
         self.runs_folder = tk.StringVar(value=default if os.path.isdir(default) else "")
+        self.run_filter = tk.StringVar()
+        self.run_filter.trace_add("write", lambda *_trace: self.fill_run_tree())
+
+    def _adopt(self, channel):
+        self._watch(channel.variables())
+        for variable in (channel.name, channel.unit):
+            variable.trace_add("write", lambda *_trace, c=channel: self._renamed(c))
+
+    def _renamed(self, channel):
+        """Carry a new name to the panel titles, time list and overlay list showing the old."""
+        old, new = channel.shown_label, channel.label()
+        channel.shown_label = new
+        if old:
+            for panel in self.panels:
+                if panel.title.get() == old:
+                    panel.title.set(new)
+        if not channel.derived:
+            self.refresh_time_sources()
+            if self.signal_tree.exists(str(channel.index)):
+                self.signal_tree.item(str(channel.index), text=new)
+
+    def _watch(self, variables):
+        """Redraw whenever one of these changes, once the edits pause."""
+        for variable in variables:
+            variable.trace_add("write", self.schedule_draw)
 
     # ---------- window ----------
 
@@ -156,49 +203,79 @@ class App(ttk.Frame):
             row=1, column=0, sticky="nw", pady=(8, 0))
 
     def _tab_runs(self, frame):
-        box = ttk.LabelFrame(frame, text=f"Run folder ({runs_module.VALUES_FILE})", padding=6)
+        box = ttk.LabelFrame(frame, text="Run folder (subfolders included)", padding=6)
         box.grid(row=0, column=0, sticky="ew")
         box.columnconfigure(0, weight=1)
-        ttk.Entry(box, textvariable=self.runs_folder).grid(row=0, column=0, sticky="ew")
+        folder = ttk.Entry(box, textvariable=self.runs_folder)
+        folder.grid(row=0, column=0, sticky="ew")
+        folder.bind("<Return>", lambda _e: self.scan_runs())
         ttk.Button(box, text="Choose\u2026", command=self.choose_runs_folder).grid(
             row=0, column=1, padx=4)
-        ttk.Button(box, text="Scan", command=self.scan_runs).grid(row=0, column=2)
+        ttk.Button(box, text="Rescan", command=self.scan_runs).grid(row=0, column=2)
 
         body = ttk.Frame(frame)
         body.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
-        body.columnconfigure((0, 1), weight=1)
-        body.rowconfigure(1, weight=1)
-        ttk.Label(body, text="Runs \u2014 \u25b6 shows one, the tick box overlays it").grid(
-            row=0, column=0, sticky="w")
-        holder, self.run_rows = scrollable(body)
-        holder.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
-        ttk.Label(body, text="Signals to overlay").grid(row=0, column=1, sticky="w")
-        holder, self.signal_rows = scrollable(body)
-        holder.grid(row=1, column=1, sticky="nsew")
+        body.columnconfigure(0, weight=3)
+        body.columnconfigure(1, weight=2)
+        body.rowconfigure(2, weight=1)
 
-        actions = ttk.Frame(frame)
-        actions.grid(row=2, column=0, sticky="ew", pady=(6, 0))
-        for text, command in (("Overlay ticked runs", self.plot_overlay),
-                              ("Back to one run", self.clear_overlay),
-                              ("Tick all runs", self.tick_all_runs),
-                              ("Untick all", self.untick_all)):
-            ttk.Button(actions, text=text, command=command).pack(side="left", padx=(0, 4))
+        ttk.Label(body, text="Runs").grid(row=0, column=0, sticky="w")
+        search = ttk.Frame(body)
+        search.grid(row=1, column=0, sticky="ew", padx=(0, 6), pady=(2, 4))
+        search.columnconfigure(1, weight=1)
+        ttk.Label(search, text="Filter").grid(row=0, column=0, padx=(0, 4))
+        ttk.Entry(search, textvariable=self.run_filter).grid(row=0, column=1, sticky="ew")
+        self.run_count = ttk.Label(search, text="", foreground=INK_2)
+        self.run_count.grid(row=0, column=2, padx=(4, 0))
+        holder, self.run_tree = scrolling_tree(body)
+        holder.grid(row=2, column=0, sticky="nsew", padx=(0, 6))
+        self.run_tree.bind("<<TreeviewSelect>>", lambda _e: self.schedule_run_selection())
+        self.run_tree.bind("<Up>", lambda _e: self.step_run(forward=False))
+        self.run_tree.bind("<Down>", lambda _e: self.step_run(forward=True))
+        self.run_tree.bind("<Shift-Button-1>", self._toggle_item)
+        self._list_buttons(body, 0, (("All", self.select_all_runs), ("None", self.select_no_runs),
+                                     ("Invert", self.invert_runs)))
+
+        ttk.Label(body, text="Signals to overlay").grid(row=0, column=1, sticky="w")
+        holder, self.signal_tree = scrolling_tree(body)
+        holder.grid(row=2, column=1, sticky="nsew")
+        self.signal_tree.bind("<<TreeviewSelect>>", lambda _e: self.on_signal_select())
+        self.signal_tree.bind("<Shift-Button-1>", self._toggle_item)
+        self._list_buttons(body, 1, (
+            ("All", lambda: self.signal_tree.selection_set(self.signal_tree.get_children())),
+            ("None", lambda: self.signal_tree.selection_set(()))))
+
         ttk.Checkbutton(frame, text="Merge signals into one panel",
                         variable=self.merge_signals, command=self.replot_overlay).grid(
-            row=3, column=0, sticky="w", pady=(6, 0))
-        ttk.Label(frame, text="Overlay draws one panel per ticked signal, one line per ticked\n"
-                             "run. Merged, every line shares one panel: colour is the run,\n"
-                             "dash pattern is the signal.",
-                  foreground=INK_2, justify="left").grid(row=4, column=0, sticky="w", pady=(6, 0))
+            row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(frame, text="Click a run to plot it. Shift- or ctrl/\u2318-click adds or drops "
+                             "one run,\na folder selects every run in it. Several runs are "
+                             "overlaid: one panel\nper selected signal, one line per run. "
+                             "Up/Down steps through the runs.\nMerged, the selected signals "
+                             "share one panel, for a single run too:\ncolour is the run, dash "
+                             "is the signal (one run: the signal's own colour).",
+                  foreground=INK_2, justify="left").grid(row=3, column=0, sticky="w", pady=(6, 0))
+
+    @staticmethod
+    def _list_buttons(parent, column, buttons):
+        row = ttk.Frame(parent)
+        row.grid(row=3, column=column, sticky="w", pady=(4, 0))
+        for text, command in buttons:
+            ttk.Button(row, text=text, command=command, width=6).pack(side="left", padx=(0, 4))
 
     def _tab_signals(self, frame):
         buttons = ttk.Frame(frame)
         buttons.grid(row=0, column=0, sticky="ew")
-        ttk.Button(buttons, text="Helicopter names", command=self.apply_heli_preset).pack(
-            side="left")
         ttk.Button(buttons, text="Add derived signal", command=self.add_derived).pack(
+            side="left")
+        ttk.Button(buttons, text="One panel each", command=self.one_panel_each).pack(
             side="left", padx=4)
-        ttk.Button(buttons, text="One panel each", command=self.one_panel_each).pack(side="left")
+        ttk.Button(buttons, text="Save names\u2026", command=self.save_names).pack(side="left")
+        ttk.Button(buttons, text="Load names\u2026", command=self.load_names).pack(
+            side="left", padx=4)
+        self.names_label = ttk.Label(frame, text="", foreground=INK_2, wraplength=600,
+                                     justify="left")
+        self.names_label.grid(row=2, column=0, sticky="w", pady=(6, 0))
         holder, self.signal_frame = scrollable(frame, horizontal=True)
         holder.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
 
@@ -261,7 +338,7 @@ class App(ttk.Frame):
             messagebox.showerror("Cannot read file", f"{path}\n\n{exc}")
             return
         self.path = path
-        self.current_run = None
+        self.forget_runs()
         self.file_label.configure(text=os.path.basename(path))
         self.variable_box.configure(values=list(self.arrays))
         self.variable.set(next(iter(self.arrays)))
@@ -292,11 +369,17 @@ class App(ttk.Frame):
 
         self.channels = [Channel(f"Signal {i}", palette_color(i), index=i)
                          for i in range(matrix.shape[0])]
+        for channel in self.channels:
+            self._adopt(channel)
         self.refresh_time_sources()
         first_is_time = len(self.channels) > 1 and data.is_time_like(matrix[0])
         self.time_source.set(self.time_box.cget("values")[1 if first_is_time else 0])
         self.shape_label.configure(
             text=f"{matrix.shape[0]} channels × {matrix.shape[1]} samples")
+        # The channels were just made with default names, so whatever file named the
+        # old ones no longer applies.
+        self.names_path = None
+        self.apply_names_for(self.path)
         self.one_panel_each()
 
     def refresh_time_sources(self):
@@ -324,47 +407,119 @@ class App(ttk.Frame):
         except (OSError, ValueError) as exc:
             messagebox.showerror("Cannot read run folder", str(exc))
             return
-        self.run_ticks = [(run, tk.BooleanVar(value=False)) for run in self.runs]
-        self.draw_run_rows()
-        untitled = [run.name for run in self.runs if not run.description]
-        self.status.configure(
-            text=f"{len(self.runs)} runs in {folder}"
-                 + (f"; no {runs_module.VALUES_FILE} line for {', '.join(untitled)}"
-                    if untitled else ""),
-            foreground=INK_2)
+        # The files may have changed on disk, so the selection is loaded afresh.
+        self.shown_runs = ()
+        self.run_matrices = {}
+        self.fill_run_tree()
+        folders = len({run.folder for run in self.runs})
+        self.status.configure(text=f"{len(self.runs)} runs in {folders} folders under {folder}",
+                              foreground=INK_2)
 
-    def draw_run_rows(self):
-        """One line per run: a button that shows it, a box that ticks it for overlay."""
-        for widget in self.run_rows.winfo_children():
-            widget.destroy()
-        self.run_rows.columnconfigure(1, weight=1)
-        for row, (run, ticked) in enumerate(self.run_ticks):
-            ttk.Button(self.run_rows, text="\u25b6", width=2,
-                       command=lambda r=run: self.load_run(r)).grid(row=row, column=0, pady=1)
-            ttk.Checkbutton(self.run_rows, text=run.listing(), variable=ticked).grid(
-                row=row, column=1, sticky="w", padx=4)
+    def fill_run_tree(self):
+        """The runs the filter lets through, under their folders, keeping the selection."""
+        tree = self.run_tree
+        kept = tree.selection()
+        tree.delete(*tree.get_children())
+        text = self.run_filter.get().strip()
+        self.run_items = {}
+        for run in self.runs:
+            if text and not run.matches(text):
+                continue
+            tree.insert(self._folder_item(run.folder), "end", iid=run.path, text=run.name)
+            self.run_items[run.path] = run
+        tree.selection_set([item for item in kept if tree.exists(item)])
+        self.run_count.configure(text=f"{len(self.run_items)} of {len(self.runs)}")
 
-    def ticked_runs(self):
-        chosen = [run for run, ticked in self.run_ticks if ticked.get()]
-        if not chosen:
-            raise ValueError("Tick at least one run in the Runs tab.")
-        return chosen
+    def _folder_item(self, folder):
+        """The tree item for a folder, made along with its parents when missing."""
+        if not folder:
+            return ""
+        item = FOLDER_PREFIX + folder
+        if not self.run_tree.exists(item):
+            parent, _slash, name = folder.rpartition("/")
+            self.run_tree.insert(self._folder_item(parent), "end", iid=item, text=f"{name}/",
+                                 open=True)
+        return item
 
-    def tick_all_runs(self):
-        for _run, ticked in self.run_ticks:
-            ticked.set(True)
+    def _tree_order(self, item=""):
+        """Every item below `item`, in the order the tree shows them."""
+        order = []
+        for child in self.run_tree.get_children(item):
+            order.append(child)
+            order.extend(self._tree_order(child))
+        return order
 
-    def untick_all(self):
-        for _item, ticked in self.run_ticks + self.signal_ticks:
-            ticked.set(False)
+    def selected_runs(self):
+        """The selected runs plus every run in a selected folder, in list order."""
+        picked = set()
+        for item in self.run_tree.selection():
+            picked.update([item] + self._tree_order(item))
+        return [run for item, run in self.run_items.items() if item in picked]
+
+    def select_all_runs(self):
+        self.run_tree.selection_set(list(self.run_items))
+
+    def select_no_runs(self):
+        self.run_tree.selection_set(())
+
+    def invert_runs(self):
+        chosen = {run.path for run in self.selected_runs()}
+        self.run_tree.selection_set([item for item in self.run_items if item not in chosen])
+
+    def step_run(self, forward):
+        """Move to the next run in the list, skipping folders."""
+        order = self._tree_order()
+        focus = self.run_tree.focus()
+        if focus in order:
+            position = order.index(focus)
+            ahead = order[position + 1:] if forward else reversed(order[:position])
+        else:
+            ahead = order
+        target = next((item for item in ahead if item in self.run_items), None)
+        if target is not None:
+            self.run_tree.selection_set(target)
+            self.run_tree.focus(target)
+            self.run_tree.see(target)
+        return "break"
+
+    def schedule_run_selection(self):
+        if self._pending_select:
+            self.after_cancel(self._pending_select)
+        self._pending_select = self.after(SELECT_DELAY_MS, self.apply_run_selection)
+
+    def apply_run_selection(self):
+        """Plot what the run list selects: one run on its own, several overlaid."""
+        self._pending_select = None
+        chosen = self.selected_runs()
+        paths = tuple(run.path for run in chosen)
+        if not chosen or paths == self.shown_runs:
+            return
+        if len(chosen) > 1:
+            shown = self.plot_overlay(chosen)
+        elif self.merge_signals.get():
+            # Loading first gives the run its names and the layout to return to unmerged.
+            shown = self.load_run(chosen[0]) and self.plot_overlay(chosen)
+        else:
+            shown = self.load_run(chosen[0])
+        if shown:
+            self.shown_runs = paths
+
+    def forget_runs(self):
+        """Leave the run list behind, for a file opened or settings loaded directly."""
+        self.overlay = None
+        self.overlay_layout = None
+        self.run_matrices = {}
+        self.shown_runs = ()
+        self.current_run = None
+        self.run_tree.selection_set(())
 
     def load_run(self, run):
-        """Show one run on its own, titled by its values.md line."""
+        """Show one run on its own. Returns whether it could be read."""
         try:
             arrays = data.load_arrays(run.path)
         except (OSError, ValueError) as exc:
-            messagebox.showerror("Cannot load run", str(exc))
-            return
+            self.status.configure(text=f"Cannot load {run.label}: {exc}", foreground=ERROR)
+            return False
         variable = next(iter(arrays))
         matrix = data.orient(arrays[variable], data.natural_orientation(arrays[variable]))
         # Stepping through runs keeps the names, panels and expressions already set up,
@@ -377,11 +532,12 @@ class App(ttk.Frame):
         self.path = run.path
         self.current_run = run
         self.overlay = None
+        self.overlay_layout = None
         self.run_matrices = {}
         self.file_label.configure(text=os.path.basename(run.path))
         self.variable_box.configure(values=list(arrays))
         self.variable.set(variable)
-        self.title.set(run.title())
+        self.title.set(run.label)
         if keep:
             self.orientation.set(data.natural_orientation(arrays[variable]))
             self.applied_orientation = self.orientation.get()
@@ -389,10 +545,12 @@ class App(ttk.Frame):
                 text=f"{matrix.shape[0]} channels \u00d7 {matrix.shape[1]} samples")
             if leaving_overlay:
                 self.show_single_layout()
-            else:
-                self.draw()
+            # Another folder may hold another signals.json, logged with another layout.
+            self.apply_names_for(run.path)
+            self.draw()
         else:
             self.select_variable()
+        return True
 
     def show_single_layout(self):
         """Put back the panels that were in use before the runs were overlaid."""
@@ -410,63 +568,98 @@ class App(ttk.Frame):
         self.draw()
 
     def refresh_signal_list(self):
-        """The overlay signal boxes, keeping whatever was already ticked."""
-        kept = {channel.label() for channel, ticked in self.signal_ticks if ticked.get()}
-        for widget in self.signal_rows.winfo_children():
-            widget.destroy()
-        self.signal_ticks = [(c, tk.BooleanVar(value=c.label() in kept))
-                             for c in self.channels if not c.derived]
-        for row, (channel, ticked) in enumerate(self.signal_ticks):
-            ttk.Checkbutton(self.signal_rows, text=channel.label(), variable=ticked).grid(
-                row=row, column=0, sticky="w", pady=1)
+        """The overlay signal list, keeping whatever was already selected."""
+        tree = self.signal_tree
+        kept = tree.selection()
+        tree.delete(*tree.get_children())
+        for channel in self.channels:
+            if not channel.derived:
+                tree.insert("", "end", iid=str(channel.index), text=channel.label())
+        tree.selection_set([item for item in kept if tree.exists(item)])
 
-    def plot_overlay(self):
-        """One panel per selected signal, one line per selected run."""
-        try:
-            chosen = self.ticked_runs()
-            signals = [channel for channel, ticked in self.signal_ticks if ticked.get()]
-            if not signals:
-                raise ValueError("Tick at least one signal to overlay.")
-            if not self.merge_signals.get() and len(signals) > MAX_PANELS:
-                raise ValueError(f"{len(signals)} signals ticked; the limit is {MAX_PANELS} "
-                                 "unless they are merged into one panel.")
-            self.run_matrices = {run.path: self._run_matrix(run) for run in chosen}
-        except (OSError, ValueError) as exc:
-            messagebox.showerror("Cannot overlay runs", str(exc))
+    def overlay_signals(self):
+        """The selected overlay signals. With none selected, the ones plotted right now."""
+        by_item = {str(c.index): c for c in self.channels if not c.derived}
+        chosen = [by_item[item] for item in self.signal_tree.get_children()
+                  if item in self.signal_tree.selection()]
+        if chosen or self.overlay:
+            return chosen
+        time_index = self.time_index()
+        chosen = [c for c in by_item.values()
+                  if c.panel.get() != HIDDEN and c.index != time_index]
+        self.signal_tree.selection_set([str(c.index) for c in chosen])
+        return chosen
+
+    @staticmethod
+    def _toggle_item(event):
+        """Shift-click adds or drops just the clicked row, not the range up to it."""
+        tree = event.widget
+        item = tree.identify_row(event.y)
+        if item:
+            tree.selection_toggle(item)
+            tree.focus(item)
+        return "break"
+
+    def on_signal_select(self):
+        if not self.overlay:
             return
+        indices = tuple(int(item) for item in self.signal_tree.selection())
+        if sorted(indices) != sorted(self.overlay_layout[0]):
+            self.plot_overlay(self.overlay[0])
+
+    def plot_overlay(self, chosen):
+        """One panel per selected signal, one line per run. Returns whether it plotted."""
+        # The signal names and panels come from a loaded log, so the first run sets them up.
+        if not self.channels and not self.load_run(chosen[0]):
+            return False
+        signals = self.overlay_signals()
+        merged = self.merge_signals.get()
+        try:
+            if not signals:
+                raise ValueError("Select at least one signal to overlay.")
+            if not merged and len(signals) > MAX_PANELS:
+                raise ValueError(f"{len(signals)} signals selected; the limit is {MAX_PANELS} "
+                                 "unless they are merged into one panel.")
+            matrices = {run.path: (self.run_matrices[run.path] if run.path in self.run_matrices
+                                   else self._run_matrix(run))
+                        for run in chosen}
+        except (OSError, ValueError) as exc:
+            self.status.configure(text=f"Cannot overlay runs: {exc}", foreground=ERROR)
+            return False
         if not self.overlay:
             self.single_layout = ([c.state() for c in self.channels],
                                   [p.state() for p in self.panels])
+        self.run_matrices = matrices
         self.overlay = (chosen, signals)
-        self.title.set("Runs " + ", ".join(run.name for run in chosen))
-        if self.merge_signals.get():
-            self._resize_panels(1)
-            self.panels[0].title.set(merged_title(signals))
-        else:
-            self._resize_panels(len(signals))
-            for panel, channel in zip(self.panels, signals):
-                panel.title.set(channel.label())
-        self.draw_panel_rows()
+        self.title.set(chosen[0].label if len(chosen) == 1 else overlay_title(chosen))
+        layout = (tuple(c.index for c in signals), merged)
+        # Only a new set of signals relays the panels, so titles and limits typed for
+        # the overlay survive adding or dropping runs.
+        if layout != self.overlay_layout:
+            self.overlay_layout = layout
+            if merged:
+                self._resize_panels(1)
+                self.panels[0].title.set(merged_title(signals))
+            else:
+                self._resize_panels(len(signals))
+                for panel, channel in zip(self.panels, signals):
+                    panel.title.set(channel.label())
+            self.draw_panel_rows()
         self.draw()
+        return True
 
     def replot_overlay(self):
-        """Merging changes the layout, so it only means something once runs are overlaid."""
-        if self.overlay:
-            self.plot_overlay()
+        """Merging changes the layout, and for a single run whether it is overlaid at all."""
+        self.shown_runs = ()
+        self.apply_run_selection()
 
     def _run_matrix(self, run):
-        arrays = data.load_arrays(run.path)
+        try:
+            arrays = data.load_arrays(run.path)
+        except ValueError as exc:
+            raise ValueError(f"{run.label}: {exc}")
         array = arrays[next(iter(arrays))]
         return data.orient(array, data.natural_orientation(array))
-
-    def clear_overlay(self):
-        self.overlay = None
-        self.run_matrices = {}
-        if self.current_run:
-            self.title.set(self.current_run.title())
-        elif self.path:
-            self.title.set(os.path.basename(self.path))
-        self.show_single_layout()
 
     # ---------- signals tab ----------
 
@@ -516,9 +709,12 @@ class App(ttk.Frame):
             messagebox.showinfo("No file", "Open a .mat file first.")
             return
         position = len(self.channels)
-        self.channels.append(Channel(f"Derived {position}", palette_color(position),
-                                     expression="t * 0", panel=HIDDEN))
+        channel = Channel(f"Derived {position}", palette_color(position),
+                          expression="t * 0", panel=HIDDEN)
+        self._adopt(channel)
+        self.channels.append(channel)
         self.draw_signal_rows()
+        self.draw()
         self.status.configure(text="Type an expression for the new signal, then press Return.",
                               foreground=INK_2)
 
@@ -541,24 +737,91 @@ class App(ttk.Frame):
         self.draw_signal_rows()
         self.draw()
 
-    def apply_heli_preset(self):
-        """Name as many channels as the preset covers; leave any extras alone."""
-        if not self.channels:
+    def raw_channels(self):
+        return [c for c in self.channels if not c.derived]
+
+    def apply_names_for(self, path):
+        """Name the logged signals from the signals.json nearest above `path`."""
+        found = names_module.find(os.path.dirname(path))
+        if found is None:
+            # Names read from a file that does not cover this log describe another layout.
+            if self.names_path:
+                self._set_names([(f"Signal {c.index}", "") for c in self.raw_channels()])
+                self.names_path = None
+            self.names_label.configure(
+                text=f"No {names_module.NAMES_FILE} at or above this log. Name the signals "
+                     "below and use Save names\u2026 to keep them.", foreground=INK_2)
             return
-        matrix = self.matrix()
-        names = HELI_PRESET if data.is_time_like(matrix[0]) else HELI_PRESET[1:]
-        applied = 0
-        for channel, (name, unit) in zip([c for c in self.channels if not c.derived], names):
+        if found == self.names_path:
+            return
+        try:
+            pairs = names_module.load(found)
+            self._check_name_count(found, pairs)
+        except (OSError, ValueError) as exc:
+            self.names_label.configure(text=f"Not applied: {exc}", foreground=ERROR)
+            return
+        self._set_names(pairs)
+        self.names_path = found
+        self.names_label.configure(text=f"Names from {found}", foreground=INK_2)
+
+    def _check_name_count(self, path, pairs):
+        count = len(self.raw_channels())
+        if len(pairs) != count:
+            raise ValueError(f"{path} names {len(pairs)} signals, this log has {count}")
+
+    def _set_names(self, pairs):
+        for channel, (name, unit) in zip(self.raw_channels(), pairs):
             channel.name.set(name)
             channel.unit.set(unit)
-            applied += 1
-        self.refresh_time_sources()
-        self.one_panel_each()
-        extra = len(self.channels) - applied
-        self.status.configure(
-            text=f"Named {applied} channels" + (f", {extra} left unnamed" if extra else "")
-                 + ("" if names is HELI_PRESET else " (no time channel found)"),
-            foreground=INK_2)
+
+    def _names_folder(self):
+        """Where Save names… starts: the file in use, else the run's experiment folder."""
+        if self.names_path:
+            return os.path.dirname(self.names_path)
+        if self.current_run and self.current_run.folder:
+            return os.path.join(self.runs_folder.get(), self.current_run.folder.split("/")[0])
+        return os.path.dirname(self.path) if self.path else os.getcwd()
+
+    def save_names(self):
+        if not self.channels:
+            messagebox.showinfo("No file", "Open a .mat file first.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save signal names", initialdir=self._names_folder(),
+            initialfile=names_module.NAMES_FILE, defaultextension=".json",
+            filetypes=[("Signal names", "*.json")])
+        if not path:
+            return
+        names_module.save(path, [(c.name.get(), c.unit.get()) for c in self.raw_channels()])
+        found = names_module.find(os.path.dirname(self.path))
+        if found and os.path.samefile(found, path):
+            self.names_path = found
+            self.names_label.configure(text=f"Names from {path}", foreground=INK_2)
+        else:
+            self.names_label.configure(
+                text=f"Saved {path}, but runs only pick up a file named "
+                     f"{names_module.NAMES_FILE} in their own folder or one above it.",
+                foreground=ERROR)
+
+    def load_names(self):
+        if not self.channels:
+            messagebox.showinfo("No file", "Open a .mat file first.")
+            return
+        path = filedialog.askopenfilename(title="Load signal names",
+                                          initialdir=self._names_folder(),
+                                          filetypes=[("Signal names", "*.json")])
+        if not path:
+            return
+        try:
+            pairs = names_module.load(path)
+            self._check_name_count(path, pairs)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Cannot load names", str(exc))
+            return
+        self._set_names(pairs)
+        self.names_path = os.path.abspath(path)
+        self.names_label.configure(text=f"Names from {path}", foreground=INK_2)
+        self.draw()
 
     # ---------- panels tab ----------
 
@@ -572,7 +835,9 @@ class App(ttk.Frame):
         count = max(1, min(count, MAX_PANELS))
         self.panel_count.set(count)
         while len(self.panels) < count:
-            self.panels.append(Panel(len(self.panels) + 1))
+            panel = Panel(len(self.panels) + 1)
+            self._watch(panel.variables())
+            self.panels.append(panel)
         del self.panels[count:]
         for channel in self.channels:
             if channel.panel.get() != HIDDEN and int(channel.panel.get()) > count:
@@ -631,7 +896,15 @@ class App(ttk.Frame):
             values[id(channel)] = channel.transform(raw)
         return t, values
 
+    def schedule_draw(self, *_trace):
+        if self._pending_draw:
+            self.after_cancel(self._pending_draw)
+        self._pending_draw = self.after(DRAW_DELAY_MS, self.draw)
+
     def draw(self):
+        if self._pending_draw:
+            self.after_cancel(self._pending_draw)
+            self._pending_draw = None
         self.figure.clear()
         self.crosshair.attach([])
         if not self.channels:
@@ -641,7 +914,7 @@ class App(ttk.Frame):
             self._draw_overlay() if self.overlay else self._draw()
         except ValueError as exc:
             self.figure.clear()
-            self.status.configure(text=str(exc), foreground="#e34948")
+            self.status.configure(text=str(exc), foreground=ERROR)
         self.canvas.draw()
 
     def _draw(self):
@@ -666,6 +939,8 @@ class App(ttk.Frame):
         """Every selected run drawn on the same panels, coloured and labelled by run."""
         chosen, signals = self.overlay
         merged = self.merge_signals.get()
+        # One run has no other runs to tell apart, so its lines keep their signal colours.
+        single = len(chosen) == 1
         index = self.time_index()
         series = {id(p): [] for p in self.panels}
         for position, run in enumerate(chosen):
@@ -677,17 +952,20 @@ class App(ttk.Frame):
             t = np.arange(matrix.shape[1], dtype=float) if index is None else matrix[index]
             for order, channel in enumerate(signals):
                 panel = self.panels[0 if merged else order]
-                label = (f"{run.legend_label()} \u00b7 {channel.name.get()}" if merged
-                         else run.legend_label())
+                if single:
+                    label, color, style = channel.name.get(), channel.color.get(), "-"
+                else:
+                    label = f"{run.label} \u00b7 {channel.name.get()}" if merged else run.label
+                    color = palette_color(position)
+                    style = line_style(order) if merged else "-"
                 series[id(panel)].append(figure_builder.Series(
-                    label, palette_color(position), line_style(order) if merged else "-",
-                    t, channel.transform(matrix[channel.index])))
+                    label, color, style, t, channel.transform(matrix[channel.index])))
         drawn = self._render(series)
         if not drawn:
             return
         self.status.configure(
-            text=f"{len(chosen)} runs \u00d7 {len(signals)} signals: "
-                 + ", ".join(run.name for run in chosen),
+            text=(f"{len(signals)} signals merged" if single
+                  else f"{len(chosen)} runs \u00d7 {len(signals)} signals"),
             foreground=INK_2)
 
     def _render(self, series):
@@ -706,8 +984,8 @@ class App(ttk.Frame):
         columns = max(1, int(self.columns.get()))
         placements, rows = figure_builder.place(drawn, columns)
         axes = figure_builder.draw(self.figure, placements, rows, columns, series, settings)
-        self.crosshair.attach([(axes[id(p)], [(x.label, x.t, x.values) for x in series[id(p)]])
-                               for p in drawn])
+        self.crosshair.attach([(axes[id(p)], series[id(p)]) for p in drawn],
+                              settings["linewidth"])
         return drawn
 
     def toggle_crosshair(self):
@@ -745,7 +1023,8 @@ class App(ttk.Frame):
     def export_csv(self):
         if self.overlay:
             messagebox.showinfo("Overlay plotted",
-                                "CSV export writes one run. Load a single run first.")
+                                "CSV export writes one unmerged run. Select a single run and untick "
+                                "Merge first.")
             return
         path = filedialog.asksaveasfilename(defaultextension=".csv",
                                             filetypes=[("CSV", "*.csv")])
@@ -791,8 +1070,10 @@ class App(ttk.Frame):
         self.status.configure(text=f"settings loaded from {path}", foreground=INK_2)
 
     def restore(self, state):
-        self.overlay = None
+        self.forget_runs()
         self.single_layout = None
+        self.names_path = None
+        self.names_label.configure(text="Names from the loaded settings.", foreground=INK_2)
         if state["path"] and state["path"] != self.path:
             self.arrays = data.load_arrays(state["path"])
             self.path = state["path"]
@@ -805,11 +1086,13 @@ class App(ttk.Frame):
         self.panels = [Panel(i + 1) for i in range(len(state["panels"]))]
         for panel, saved in zip(self.panels, state["panels"]):
             panel.restore(saved)
+            self._watch(panel.variables())
         self.panel_count.set(len(self.panels))
 
         self.channels = [Channel("", "#000000") for _ in state["channels"]]
         for channel, saved in zip(self.channels, state["channels"]):
             channel.restore(saved)
+            self._adopt(channel)
 
         self.refresh_time_sources()
         self.time_source.set(state["time_source"])

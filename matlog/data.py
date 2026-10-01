@@ -8,12 +8,17 @@ MAX_CHANNELS = 64
 
 def load_arrays(path):
     """Every 2-D numeric variable in a .mat file, keyed by name."""
-    mat = scipy.io.loadmat(path)
+    try:
+        mat = scipy.io.loadmat(path)
+    except (scipy.io.matlab.MatReadError, NotImplementedError) as exc:
+        # NotImplementedError is how scipy turns away v7.3 (HDF5) files.
+        raise ValueError(f"{path} cannot be read: {exc}") from exc
     arrays = {k: np.atleast_2d(v) for k, v in mat.items()
               if not k.startswith("__") and isinstance(v, np.ndarray)
-              and v.ndim <= 2 and np.issubdtype(v.dtype, np.number)}
+              and v.ndim <= 2 and v.size and np.issubdtype(v.dtype, np.number)}
     if not arrays:
-        raise ValueError(f"{path} holds no 2-D numeric array")
+        # An aborted run leaves its To File matrix with no samples at all.
+        raise ValueError(f"{path} holds no non-empty 2-D numeric array")
     return arrays
 
 

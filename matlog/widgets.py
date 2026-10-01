@@ -29,9 +29,25 @@ def scrollable(parent, horizontal=False):
 
 
 def _wheel(canvas, event):
-    if canvas.winfo_containing(event.x_root, event.y_root) is None:
+    # The binding is global, so every scrollable sees every wheel event; only the
+    # one under the pointer may move.
+    under = canvas.winfo_containing(event.x_root, event.y_root)
+    if under is None or not (str(under) + ".").startswith(str(canvas) + "."):
         return
     canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+
+def scrolling_tree(parent):
+    """A multi-select tree with a vertical scrollbar. Returns (holder, tree)."""
+    holder = ttk.Frame(parent)
+    holder.rowconfigure(0, weight=1)
+    holder.columnconfigure(0, weight=1)
+    tree = ttk.Treeview(holder, show="tree", selectmode="extended")
+    tree.grid(row=0, column=0, sticky="nsew")
+    bar = ttk.Scrollbar(holder, orient="vertical", command=tree.yview)
+    bar.grid(row=0, column=1, sticky="ns")
+    tree.configure(yscrollcommand=bar.set)
+    return holder, tree
 
 
 def labelled_entry(parent, row, text, variable, width=None):
