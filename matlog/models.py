@@ -78,31 +78,39 @@ class Channel:
 
 
 class LineLook:
-    """The legend text and style the user gave one plotted line.
+    """The legend text, style and colour the user gave one plotted line.
 
     The text starts as the automatic label and keeps following it until edited, so
     renaming a signal still reaches legends nobody has touched.
     """
 
-    def __init__(self, auto_label=None, label="", style="auto"):
+    def __init__(self, auto_label=None, label="", style="auto", color=""):
         self.auto_label = auto_label
         self.label = tk.StringVar(value=auto_label if auto_label is not None else label)
         self.style = tk.StringVar(value=style)
+        # Empty leaves the colour to the view.
+        self.color = tk.StringVar(value=color)
+
+    def variables(self):
+        return (self.label, self.style, self.color)
 
     def edited(self):
-        return self.label.get() != self.auto_label or self.style.get() != "auto"
+        return (self.label.get() != self.auto_label or self.style.get() != "auto"
+                or bool(self.color.get()))
 
-    def resolve(self, auto_label, auto_style):
-        """(legend text, matplotlib style) for this draw."""
+    def resolve(self, auto_label, auto_style, auto_color):
+        """(legend text, matplotlib style, colour) for this draw."""
         # Writing only on a real change keeps the variable trace from redrawing forever.
         if auto_label != self.auto_label and self.label.get() == self.auto_label:
             self.label.set(auto_label)
         self.auto_label = auto_label
-        return self.label.get(), LINE_STYLES[self.style.get()] or auto_style
+        return (self.label.get(), LINE_STYLES[self.style.get()] or auto_style,
+                self.color.get() or auto_color)
 
     def reset(self):
         self.label.set(self.auto_label or "")
         self.style.set("auto")
+        self.color.set("")
 
 
 class Panel:

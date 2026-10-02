@@ -76,8 +76,16 @@ be chosen. Runs are named by their path below that folder, e.g. `day2/data_2-1-3
 - **Filter** narrows the list to runs whose path contains the text.
 - **All / None / Invert** under each list change the selection in one go.
 - **Hover a line** to highlight it and see which run (and, merged, which signal) it is.
-- **Merge signals into one panel** puts every line in a single panel instead: colour is
-  the run, dash pattern is the signal.
+- **Layout** sets how the selected signals are laid out:
+  - *Overlay*: a panel per signal, a line per run.
+  - *Merged*: every line in one panel. Colour is the run, dash pattern is the signal.
+  - *Grid*: a panel per signal and run, one row per signal and one column per run, so
+    the same signal of different runs sits side by side.
+  - *Side by side*: a panel per run, in one row, each holding that run's selected
+    signals together. Colour is the signal, the same in every panel.
+
+  Merged, Grid and Side by side work on a single run too, showing just its selected
+  signals.
 
 Edits in the Signals, Panels and Figure tabs redraw on their own once you stop typing.
 
@@ -86,9 +94,11 @@ Edits in the Signals, Panels and Figure tabs redraw on their own once you stop t
 The **Lines** tab lists every plotted line under its panel, with a Legend box per panel.
 Each line's legend text starts as the automatic label (signal name and unit for one run,
 the run's path when runs are overlaid) and follows renames until you edit it. Clear the
-text to leave a line out of the legend. The style menu sets a line solid, dashed, dotted
-or dash-dot; *auto* keeps the view's own choice. Lines of a single run keep their legend
-and style while stepping through runs, and **Save settings…** stores them.
+text to leave a line out of the legend. Click a line's colour swatch to pick its colour.
+The style menu sets a line solid, dashed, dotted or dash-dot; *auto* keeps the view's own
+choice. **Reset all** puts text, colour and style back to automatic. Lines of a single
+run keep their legend, style and colour while stepping through runs, and
+**Save settings…** stores them.
 
 ## Signal names
 

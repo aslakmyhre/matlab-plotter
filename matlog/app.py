@@ -24,6 +24,14 @@ DRAW_DELAY_MS = 400
 # Holding an arrow key in the run list loads only the run it stops on.
 SELECT_DELAY_MS = 120
 ERROR = "#e34948"
+# How several runs, or the selected signals of one, are laid out.
+OVERLAY, MERGED, GRID, SIDE_BY_SIDE = "overlay", "merged", "grid", "side by side"
+LAYOUT_CHOICES = ((OVERLAY, "Overlay: a panel per signal, a line per run"),
+                  (MERGED, "Merged: every line in one panel"),
+                  (GRID, "Grid: a panel per signal and run \u2014 rows are signals, "
+                         "columns runs"),
+                  (SIDE_BY_SIDE, "Side by side: a panel per run, its selected signals "
+                                 "together"))
 FOLDER_PREFIX = "dir:"
 
 
@@ -65,7 +73,7 @@ class App(ttk.Frame):
         self.shown_runs = ()
         # Set while several runs are plotted together: (runs, channels overlaid).
         self.overlay = None
-        # What the overlay panels were laid out for: (channel indices, merged).
+        # What the overlay panels were laid out for: (channel indices, layout, grid runs).
         self.overlay_layout = None
         # Matrices of the overlaid runs, by path, so adding one run loads only that run.
         self.run_matrices = {}
@@ -109,7 +117,7 @@ class App(ttk.Frame):
         self.xmax = tk.StringVar()
         self.link_x = tk.BooleanVar(value=True)
         self.crosshair_on = tk.BooleanVar(value=True)
-        self.merge_signals = tk.BooleanVar(value=False)
+        self.run_layout = tk.StringVar(value=OVERLAY)
         default = os.path.join(os.getcwd(), "runs")
         self.runs_folder = tk.StringVar(value=default if os.path.isdir(default) else "")
         self.run_filter = tk.StringVar()
@@ -253,15 +261,17 @@ class App(ttk.Frame):
             ("All", lambda: self.signal_tree.selection_set(self.signal_tree.get_children())),
             ("None", lambda: self.signal_tree.selection_set(()))))
 
-        ttk.Checkbutton(frame, text="Merge signals into one panel",
-                        variable=self.merge_signals, command=self.replot_overlay).grid(
-            row=2, column=0, sticky="w", pady=(6, 0))
+        layouts = ttk.Frame(frame)
+        layouts.grid(row=2, column=0, sticky="w", pady=(6, 0))
+        for value, text in LAYOUT_CHOICES:
+            ttk.Radiobutton(layouts, text=text, value=value, variable=self.run_layout,
+                            command=self.replot_overlay).pack(anchor="w")
         ttk.Label(frame, text="Click a run to plot it. Shift- or ctrl/\u2318-click adds or drops "
-                             "one run,\na folder selects every run in it. Several runs are "
-                             "overlaid: one panel\nper selected signal, one line per run. "
-                             "Up/Down steps through the runs.\nMerged, the selected signals "
-                             "share one panel, for a single run too:\ncolour is the run, dash "
-                             "is the signal (one run: the signal's own colour).",
+                             "one run,\na folder selects every run in it. Up/Down steps "
+                             "through the runs.\nMerged, Grid and Side by side apply to a single "
+                             "run too, using the\nselected signals. Merged: colour is the run, "
+                             "dash is the signal (one run:\nthe signal's own colour). Side by "
+                             "side: colour is the signal.",
                   foreground=INK_2, justify="left").grid(row=3, column=0, sticky="w", pady=(6, 0))
 
     @staticmethod
@@ -516,8 +526,8 @@ class App(ttk.Frame):
             return
         if len(chosen) > 1:
             shown = self.plot_overlay(chosen)
-        elif self.merge_signals.get():
-            # Loading first gives the run its names and the layout to return to unmerged.
+        elif self.run_layout.get() != OVERLAY:
+            # Loading first gives the run its names and the layout to return to.
             shown = self.load_run(chosen[0]) and self.plot_overlay(chosen)
         else:
             shown = self.load_run(chosen[0])
@@ -577,7 +587,8 @@ class App(ttk.Frame):
         if not self.single_layout or len(self.single_layout[0]) != len(self.channels):
             self.one_panel_each()
             return
-        channels, panels = self.single_layout
+        channels, panels, columns = self.single_layout
+        self.columns.set(columns)
         self._resize_panels(len(panels))
         for panel, saved in zip(self.panels, panels):
             panel.restore(saved)
@@ -628,18 +639,20 @@ class App(ttk.Frame):
             self.plot_overlay(self.overlay[0])
 
     def plot_overlay(self, chosen):
-        """One panel per selected signal, one line per run. Returns whether it plotted."""
+        """Lay the selected signals of these runs out. Returns whether it plotted."""
         # The signal names and panels come from a loaded log, so the first run sets them up.
         if not self.channels and not self.load_run(chosen[0]):
             return False
         signals = self.overlay_signals()
-        merged = self.merge_signals.get()
+        layout = self.run_layout.get()
+        panel_count = {OVERLAY: len(signals), MERGED: 1, GRID: len(signals) * len(chosen),
+                       SIDE_BY_SIDE: len(chosen)}[layout]
         try:
             if not signals:
                 raise ValueError("Select at least one signal to overlay.")
-            if not merged and len(signals) > MAX_PANELS:
-                raise ValueError(f"{len(signals)} signals selected; the limit is {MAX_PANELS} "
-                                 "unless they are merged into one panel.")
+            if panel_count > MAX_PANELS:
+                raise ValueError(f"that takes {panel_count} panels; the limit is {MAX_PANELS}. "
+                                 "Select fewer signals or runs, or merge them into one panel.")
             matrices = {run.path: (self.run_matrices[run.path] if run.path in self.run_matrices
                                    else self._run_matrix(run))
                         for run in chosen}
@@ -648,28 +661,52 @@ class App(ttk.Frame):
             return False
         if not self.overlay:
             self.single_layout = ([c.state() for c in self.channels],
-                                  [p.state() for p in self.panels])
+                                  [p.state() for p in self.panels], int(self.columns.get()))
         self.run_matrices = matrices
         self.overlay = (chosen, signals)
         self.title.set(chosen[0].label if len(chosen) == 1 else overlay_title(chosen))
-        layout = (tuple(c.index for c in signals), merged)
-        # Only a new set of signals relays the panels, so titles and limits typed for
-        # the overlay survive adding or dropping runs.
-        if layout != self.overlay_layout:
-            self.overlay_layout = layout
-            if merged:
-                self._resize_panels(1)
-                self.panels[0].title.set(merged_title(signals))
-            else:
-                self._resize_panels(len(signals))
-                for panel, channel in zip(self.panels, signals):
-                    panel.title.set(channel.label())
+        # Grid and side by side have a column per run, so there the runs shape the panels too.
+        shape = (tuple(c.index for c in signals), layout,
+                 tuple(run.path for run in chosen) if layout in (GRID, SIDE_BY_SIDE) else ())
+        # Only a new shape relays the panels, so titles and limits typed for the overlay
+        # survive adding or dropping runs.
+        if shape != self.overlay_layout:
+            self.overlay_layout = shape
+            self._lay_out(layout, chosen, signals)
             self.draw_panel_rows()
         self.draw()
         return True
 
+    def _lay_out(self, layout, chosen, signals):
+        """Size and title the panels for the run layout."""
+        if layout == GRID:
+            self.columns.set(len(chosen))
+            self._resize_panels(len(signals) * len(chosen))
+            # Row-major: each signal's row holds one panel per run.
+            cells = [(channel, run) for channel in signals for run in chosen]
+            for panel, (channel, run) in zip(self.panels, cells):
+                panel.span.set(False)
+                panel.title.set(channel.label() if len(chosen) == 1
+                                else f"{channel.label()} \u2014 {run.name}")
+            return
+        if layout == SIDE_BY_SIDE:
+            self.columns.set(len(chosen))
+            self._resize_panels(len(chosen))
+            for panel, run in zip(self.panels, chosen):
+                panel.span.set(False)
+                panel.title.set(merged_title(signals) if len(chosen) == 1 else run.name)
+            return
+        self.columns.set(self.single_layout[2])
+        if layout == MERGED:
+            self._resize_panels(1)
+            self.panels[0].title.set(merged_title(signals))
+        else:
+            self._resize_panels(len(signals))
+            for panel, channel in zip(self.panels, signals):
+                panel.title.set(channel.label())
+
     def replot_overlay(self):
-        """Merging changes the layout, and for a single run whether it is overlaid at all."""
+        """The layout decides the panels, and for a single run whether it is overlaid at all."""
         self.shown_runs = ()
         self.apply_run_selection()
 
@@ -960,7 +997,8 @@ class App(ttk.Frame):
     def _draw_overlay(self):
         """Every selected run drawn on the same panels, coloured and labelled by run."""
         chosen, signals = self.overlay
-        merged = self.merge_signals.get()
+        layout = self.run_layout.get()
+        merged = layout == MERGED
         # One run has no other runs to tell apart, so its lines keep their signal colours.
         single = len(chosen) == 1
         index = self.time_index()
@@ -973,11 +1011,16 @@ class App(ttk.Frame):
                                  f"channel {needed} was asked for")
             t = np.arange(matrix.shape[1], dtype=float) if index is None else matrix[index]
             for order, channel in enumerate(signals):
-                panel = self.panels[0 if merged else order]
-                if single:
+                panel = self.panels[{OVERLAY: order, MERGED: 0,
+                                     GRID: order * len(chosen) + position,
+                                     SIDE_BY_SIDE: position}[layout]]
+                # Side by side, the panel already names the run, and every panel colours
+                # the same signal alike.
+                if single or layout == SIDE_BY_SIDE:
                     label, color, style = channel.name.get(), channel.color.get(), "-"
                 else:
-                    label = f"{run.label} \u00b7 {channel.name.get()}" if merged else run.label
+                    label = (run.label if layout == OVERLAY
+                             else f"{run.label} \u00b7 {channel.name.get()}")
                     color = palette_color(position)
                     style = line_style(order) if merged else "-"
                 key = ("" if single else run.path, channel.uid)
@@ -987,8 +1030,9 @@ class App(ttk.Frame):
         if not drawn:
             return
         self.status.configure(
-            text=(f"{len(signals)} signals merged" if single
-                  else f"{len(chosen)} runs \u00d7 {len(signals)} signals"),
+            text=(f"{len(signals)} signals" + (" merged" if merged else "") if single
+                  else f"{len(chosen)} runs \u00d7 {len(signals)} signals"
+                       + {GRID: " in a grid", SIDE_BY_SIDE: " side by side"}.get(layout, "")),
             foreground=INK_2)
 
     def _render(self, series):
@@ -1013,12 +1057,12 @@ class App(ttk.Frame):
         return drawn
 
     def _line(self, panel, key, auto_label, color, auto_style, t, values):
-        """One Series, with whatever legend text and style the user gave this line."""
+        """One Series, with whatever legend text, style and colour the user gave this line."""
         look = self.line_looks.get(key)
         if look is None:
             look = self.line_looks[key] = LineLook(auto_label)
-            self._watch((look.label, look.style))
-        legend, style = look.resolve(auto_label, auto_style)
+            self._watch(look.variables())
+        legend, style, color = look.resolve(auto_label, auto_style, color)
         self.drawn_lines.append((panel, look, color))
         return figure_builder.Series(auto_label, legend, color, style, t, values)
 
@@ -1047,8 +1091,9 @@ class App(ttk.Frame):
                             command=self.draw).pack(side="right")
             row += 1
             for look, color in lines:
-                swatch = tk.Label(self.line_frame, background=color, width=2)
+                swatch = tk.Label(self.line_frame, background=color, width=2, cursor="hand2")
                 swatch.grid(row=row, column=0, padx=(0, 4), pady=1)
+                swatch.bind("<Button-1>", lambda _e, k=look: self.pick_line_color(k))
                 self.line_swatches[id(look)] = swatch
                 ttk.Entry(self.line_frame, textvariable=look.label).grid(
                     row=row, column=1, sticky="ew", pady=1)
@@ -1057,6 +1102,13 @@ class App(ttk.Frame):
                 style.grid(row=row, column=2, padx=(4, 0), pady=1)
                 style.bind("<<ComboboxSelected>>", lambda _e: self.draw())
                 row += 1
+
+    def pick_line_color(self, look):
+        current = self.line_swatches[id(look)].cget("background")
+        chosen = colorchooser.askcolor(color=current, title=look.label.get())[1]
+        if chosen:
+            look.color.set(chosen)
+            self.draw()
 
     def reset_lines(self):
         for _panel, look, _color in self.drawn_lines:
@@ -1098,8 +1150,8 @@ class App(ttk.Frame):
     def export_csv(self):
         if self.overlay:
             messagebox.showinfo("Overlay plotted",
-                                "CSV export writes one unmerged run. Select a single run and untick "
-                                "Merge first.")
+                                "CSV export writes one run in the Overlay layout. Select a single "
+                                "run with Overlay chosen first.")
             return
         path = filedialog.asksaveasfilename(defaultextension=".csv",
                                             filetypes=[("CSV", "*.csv")])
@@ -1127,9 +1179,10 @@ class App(ttk.Frame):
                     lines=self._line_states())
 
     def _line_states(self):
-        """The single-run lines given their own legend or style, by signal position."""
+        """The single-run lines given their own legend, style or colour, by signal position."""
         position = {c.uid: i for i, c in enumerate(self.channels)}
-        return [dict(signal=position[uid], label=look.label.get(), style=look.style.get())
+        return [dict(signal=position[uid], label=look.label.get(), style=look.style.get(),
+                     color=look.color.get())
                 for (run, uid), look in self.line_looks.items()
                 if run == "" and uid in position and look.edited()]
 
@@ -1179,8 +1232,10 @@ class App(ttk.Frame):
         self.line_looks = {}
         # Settings saved before legends could be edited have no "lines".
         for saved in state.get("lines", []):
-            look = LineLook(label=saved["label"], style=saved["style"])
-            self._watch((look.label, look.style))
+            # Settings saved before line colours could be picked have no "color".
+            look = LineLook(label=saved["label"], style=saved["style"],
+                            color=saved.get("color", ""))
+            self._watch(look.variables())
             self.line_looks[("", self.channels[saved["signal"]].uid)] = look
 
         self.refresh_time_sources()
