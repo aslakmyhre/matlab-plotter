@@ -1,0 +1,48 @@
+{
+  "signals": [
+    {
+      "name": "Time",
+      "unit": "s"
+    },
+    {
+      "name": "Travel",
+      "unit": "rad"
+    },
+    {
+      "name": "Travel rate",
+      "unit": "rad/s"
+    },
+    {
+      "name": "Pitch",
+      "unit": "rad"
+    },
+    {
+      "name": "Pitch rate",
+      "unit": "rad/s"
+    },
+    {
+      "name": "Elevation",
+      "unit": "rad"
+    },
+    {
+      "name": "Elevation rate",
+      "unit": "rad/s"
+    },
+    {
+      "name": "p_c",
+      "unit": "rad"
+    },
+    {
+      "name": "e_c_dot",
+      "unit": "rad/s"
+    },
+    {
+      "name": "",
+      "unit": ""
+    },
+    {
+      "name": "",
+      "unit": ""
+    }
+  ]
+}

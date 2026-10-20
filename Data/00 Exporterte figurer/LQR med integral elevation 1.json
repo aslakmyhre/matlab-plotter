@@ -1,0 +1,162 @@
+{
+  "path": "/Users/aslak/Documents/Helikopterlab Linsys/Data/LQR med integral/run_80_q1_20.00_q2_1.00_q3_2.00_q4_1.00_q5_2.00_r1_0.01_r2_0.10.mat",
+  "variable": "data",
+  "orientation": "rows",
+  "time_source": "0: Signal 0",
+  "title": "LQR with integral - Elevation",
+  "xlabel": "Time [s]",
+  "columns": 1,
+  "linewidth": "1.4",
+  "auto_x": false,
+  "xmin": "5",
+  "xmax": "30",
+  "link_x": true,
+  "crosshair": true,
+  "channels": [
+    {
+      "index": 0,
+      "name": "Signal 0",
+      "unit": "",
+      "expression": "channel 0",
+      "scale": "1",
+      "offset": "0",
+      "color": "#2a78d6",
+      "panel": "hidden"
+    },
+    {
+      "index": 1,
+      "name": "Signal 1",
+      "unit": "",
+      "expression": "channel 1",
+      "scale": "1",
+      "offset": "0",
+      "color": "#eb6834",
+      "panel": "1"
+    },
+    {
+      "index": 2,
+      "name": "Signal 2",
+      "unit": "",
+      "expression": "channel 2",
+      "scale": "1",
+      "offset": "0",
+      "color": "#1baf7a",
+      "panel": "hidden"
+    },
+    {
+      "index": 3,
+      "name": "Signal 3",
+      "unit": "",
+      "expression": "channel 3",
+      "scale": "1",
+      "offset": "0",
+      "color": "#eda100",
+      "panel": "hidden"
+    },
+    {
+      "index": 4,
+      "name": "Signal 4",
+      "unit": "",
+      "expression": "channel 4",
+      "scale": "1",
+      "offset": "0",
+      "color": "#e87ba4",
+      "panel": "hidden"
+    },
+    {
+      "index": 5,
+      "name": "Signal 5",
+      "unit": "",
+      "expression": "channel 5",
+      "scale": "1",
+      "offset": "0",
+      "color": "#008300",
+      "panel": "hidden"
+    },
+    {
+      "index": 6,
+      "name": "Signal 6",
+      "unit": "",
+      "expression": "channel 6",
+      "scale": "1",
+      "offset": "0",
+      "color": "#4a3aa7",
+      "panel": "hidden"
+    },
+    {
+      "index": 7,
+      "name": "Signal 7",
+      "unit": "",
+      "expression": "channel 7",
+      "scale": "1",
+      "offset": "0",
+      "color": "#e34948",
+      "panel": "hidden"
+    },
+    {
+      "index": 8,
+      "name": "Signal 8",
+      "unit": "",
+      "expression": "channel 8",
+      "scale": "1",
+      "offset": "0",
+      "color": "#2a78d6",
+      "panel": "hidden"
+    },
+    {
+      "index": 9,
+      "name": "Signal 9",
+      "unit": "",
+      "expression": "channel 9",
+      "scale": "1",
+      "offset": "0",
+      "color": "#eb6834",
+      "panel": "hidden"
+    },
+    {
+      "index": 10,
+      "name": "Signal 10",
+      "unit": "",
+      "expression": "channel 10",
+      "scale": "1",
+      "offset": "0",
+      "color": "#1baf7a",
+      "panel": "hidden"
+    }
+  ],
+  "panels": [
+    {
+      "title": "e",
+      "ylabel": "Elevation [rad]",
+      "auto_y": true,
+      "ymin": "",
+      "ymax": "",
+      "legend": false,
+      "grid": true,
+      "span": false,
+      "xlabels": "auto"
+    },
+    {
+      "title": "e_dot",
+      "ylabel": "Elevation rate [rad/s]",
+      "auto_y": false,
+      "ymin": "-0.2",
+      "ymax": "0.2",
+      "legend": false,
+      "grid": true,
+      "span": false,
+      "xlabels": "auto"
+    },
+    {
+      "title": "e_c_dot",
+      "ylabel": "Elevation rate [rad/s]",
+      "auto_y": false,
+      "ymin": "-0.2",
+      "ymax": "0.2",
+      "legend": false,
+      "grid": true,
+      "span": false,
+      "xlabels": "auto"
+    }
+  ]
+}
