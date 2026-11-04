@@ -170,7 +170,9 @@ def add_placeholder(entry, variable, text):
         else:
             hint.place(x=px(6), rely=0.5, anchor="w")
 
-    variable.trace_add("write", refresh)
+    trace = variable.trace_add("write", refresh)
+    # The variable outlives rows that get rebuilt, and must not call into a dead widget.
+    hint.bind("<Destroy>", lambda _e: variable.trace_remove("write", trace))
     refresh()
 
 
@@ -222,32 +224,41 @@ class Tooltip:
         self.shown_text = ""
 
 
-class Checklist(ttk.Frame):
-    """Rows of a drag handle, a tick box, a colour patch and a label, keyed by a string.
+class DragRows(ttk.Frame):
+    """Rows of a drag handle, a label and a colour patch, keyed by a string.
 
-    A click calls on_toggle() and a finished drag calls on_reorder(keys). Setting the ticks
-    from code calls neither, so the list can follow the plot without feeding back into it.
+    A finished drag calls on_reorder(keys). With scrolling off, the rows sit in a pane that
+    scrolls by itself.
     """
 
-    def __init__(self, parent, on_toggle, on_color, on_reorder, handle_tip):
+    def __init__(self, parent, on_color, on_reorder, handle_tip, scrolling=True):
         super().__init__(parent)
-        self.on_toggle = on_toggle
         self.on_color = on_color
         self.on_reorder = on_reorder
         self.handle_tip = handle_tip
-        self.rowconfigure(0, weight=1)
+        self.scrolling = scrolling
         self.columnconfigure(0, weight=1)
-        holder, self.inner = scrollable(self)
-        holder.grid(row=0, column=0, sticky="nsew")
+        if scrolling:
+            self.rowconfigure(0, weight=1)
+            holder, self.inner = scrollable(self)
+            holder.grid(row=0, column=0, sticky="nsew")
+        else:
+            self.inner = self
+        self.inner.columnconfigure(0, weight=0)
         self.inner.columnconfigure(1, weight=1)
+        # key -> (main widget, colour patch, handle).
         self.rows = {}
         # The keys in the order shown.
         self.order = []
         self.dragged = None
         self.order_before_drag = []
 
+    def _make_main(self, key, text):
+        """The widget in the middle of a row."""
+        return ttk.Label(self.inner, text=text)
+
     def set_items(self, items):
-        """Rebuild for `items`, a list of (key, text, colour). Starts with nothing ticked."""
+        """Rebuild for `items`, a list of (key, text, colour)."""
         for widget in self.inner.winfo_children():
             widget.destroy()
         self.rows = {}
@@ -260,24 +271,22 @@ class Checklist(ttk.Frame):
             handle.bind("<B1-Motion>", self._drag)
             handle.bind("<ButtonRelease-1>", lambda _e: self._finish_drag())
             Tooltip(handle, self.handle_tip)
-            ticked = tk.BooleanVar(self, value=False)
-            box = ttk.Checkbutton(self.inner, text=text, variable=ticked, command=self.on_toggle,
-                                  style="Row.TCheckbutton", takefocus=False)
+            main = self._make_main(key, text)
             patch = swatch(self.inner, color, lambda k=key: self.on_color(k))
-            self.rows[key] = (ticked, box, patch, handle)
+            self.rows[key] = (main, patch, handle)
         self._place_rows()
 
     def _place_rows(self):
         for row, key in enumerate(self.order):
-            _ticked, box, patch, handle = self.rows[key]
+            main, patch, handle = self.rows[key]
             handle.grid(row=row, column=0, padx=(0, px(4)))
-            box.grid(row=row, column=1, sticky="ew")
+            main.grid(row=row, column=1, sticky="ew")
             patch.grid(row=row, column=2, padx=(px(4), 0))
 
     def _start_drag(self, key):
         self.dragged = key
         self.order_before_drag = list(self.order)
-        self.rows[key][3].configure(foreground=ACCENT)
+        self.rows[key][2].configure(foreground=ACCENT)
 
     def _drag(self, event):
         if self.dragged is None:
@@ -292,6 +301,8 @@ class Checklist(ttk.Frame):
 
     def _scroll_at_edges(self, pointer_y):
         """Dragging past the top or bottom of the view brings the hidden rows in."""
+        if not self.scrolling:
+            return
         viewport = self.inner.master
         top = viewport.winfo_rooty()
         if pointer_y < top:
@@ -302,18 +313,41 @@ class Checklist(ttk.Frame):
     def _finish_drag(self):
         if self.dragged is None:
             return
-        self.rows[self.dragged][3].configure(foreground=INK_3)
+        self.rows[self.dragged][2].configure(foreground=INK_3)
         self.dragged = None
         if self.order != self.order_before_drag:
             self.on_reorder(list(self.order))
 
-    def checked(self):
-        return [key for key in self.order if self.rows[key][0].get()]
-
-    def set_checked(self, keys):
-        for key, row in self.rows.items():
-            row[0].set(key in keys)
-
     def rename(self, key, text):
         if key in self.rows:
-            self.rows[key][1].configure(text=text)
+            self.rows[key][0].configure(text=text)
+
+
+class Checklist(DragRows):
+    """DragRows with a tick box in each row.
+
+    A click calls on_toggle(); setting the ticks from code does not, so the list can
+    follow the plot without feeding back into it.
+    """
+
+    def __init__(self, parent, on_toggle, on_color, on_reorder, handle_tip):
+        self.on_toggle = on_toggle
+        self.ticks = {}
+        super().__init__(parent, on_color, on_reorder, handle_tip)
+
+    def _make_main(self, key, text):
+        self.ticks[key] = tk.BooleanVar(self, value=False)
+        return ttk.Checkbutton(self.inner, text=text, variable=self.ticks[key],
+                               command=self.on_toggle, style="Row.TCheckbutton", takefocus=False)
+
+    def set_items(self, items):
+        """Rebuild for `items`. Starts with nothing ticked."""
+        self.ticks = {}
+        super().set_items(items)
+
+    def checked(self):
+        return [key for key in self.order if self.ticks[key].get()]
+
+    def set_checked(self, keys):
+        for key, ticked in self.ticks.items():
+            ticked.set(key in keys)

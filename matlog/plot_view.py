@@ -13,7 +13,7 @@ ZOOM_STEP = 1.2
 TOUCHPAD_PIXELS_PER_STEP = 40.0
 SHIFT_MASK = 0x1
 PAN_MODE, ZOOM_MODE = "pan/zoom", "zoom rect"
-IDLE_HINT = "Scroll to zoom, shift-scroll for y, double-click to reset"
+IDLE_HINT = "Scroll to zoom, double-click to reset"
 
 
 class PlotToolbar(NavigationToolbar2Tk):
@@ -34,7 +34,7 @@ class PlotToolbar(NavigationToolbar2Tk):
         bar = ttk.Frame(parent, padding=(px(10), px(4)))
         bar.columnconfigure(5, weight=1)
         for column, (text, command, tip) in enumerate((
-                ("Reset", self.home, "Back to the full view (or double-click the plot)"),
+                ("Full view", self.home, "Back to the full view (or double-click the plot)"),
                 ("Back", self.back, "Previous view"),
                 ("Forward", self.forward, "Next view"))):
             button = ttk.Button(bar, text=text, style="Ghost.TButton", command=command,

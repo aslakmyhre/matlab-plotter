@@ -30,8 +30,6 @@ def main():
             app.open_folder(target)
         else:
             app.open_file(target)
-    else:
-        app.reopen_last_folder()
     root.mainloop()
 
 

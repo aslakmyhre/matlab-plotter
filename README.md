@@ -7,10 +7,10 @@ It looks the same on Windows, Linux and macOS.
 python3 mat_plotter.py [file.mat | folder]
 ```
 
-Run without arguments it reopens the last folder. Window size, panes, layout and export
-settings are remembered too, in `prefs.json` in `%APPDATA%\MatLogPlotter`,
-`~/Library/Application Support/MatLogPlotter` or `~/.config/MatLogPlotter`. Delete that file
-to start fresh.
+It starts empty: nothing opens until you choose it, and recent folders and files are one click
+away. Window size, panes and export settings are remembered, in `prefs.json` in
+`%APPDATA%\\MatLogPlotter`, `~/Library/Application Support/MatLogPlotter` or
+`~/.config/MatLogPlotter`. Delete that file to start fresh.
 
 ## Requirements
 
@@ -76,13 +76,12 @@ Or activate the venv first (`source .venv/bin/activate`) and just use `python ma
 ### Runs
 
 **Open folder…** lists every `.mat` log below a folder, subfolders included. Runs are named by
-their path below it, e.g. `day2/data_2-1-3-runC`. A folder named `runs/` next to the app is
-picked up when there is no last folder to reopen.
+their path below it, e.g. `day2/data_2-1-3-runC`. Folders start closed; click one to open it.
 
-- **Click a run** to plot it. Moving between runs keeps the names, panels, expressions and
-  zoom. **↑ / ↓** step through the runs from anywhere but a text field.
-- **Ctrl/⌘-click or shift-click** adds or drops a run, and **click a folder** for every run in
-  it. Runs of different lengths are fine: every line carries its own time vector.
+- **Click a run** to plot it. **↑ / ↓** step through the runs from anywhere but a text field.
+- **Ctrl/⌘-click or shift-click** adds or drops a run. **Ctrl/⌘-click a folder** selects every
+  run in it. Runs of different lengths are fine: every line carries its own time vector, and a
+  log with fewer signals simply has no line for the ones it lacks.
 - **Filter** narrows the list to runs whose path contains the text. Esc clears it.
 - Hover a run for its full name.
 
@@ -94,9 +93,15 @@ the same panel for them in the Signals tab. Click a colour patch to change the c
 
 **Drag a signal by its handle (≡) to reorder it.** Higher in the list is drawn in front, so
 dragging a noisy signal down stops it covering the others. The order also sets the panel
-order and the legend order. It is remembered for logs with the same number of signals, and
-**Save…** under Figure → Settings file stores it too. Derived signals are not in the list:
-they are always drawn behind the signals listed there.
+order and the legend order. **Save…** under Figure → Settings file stores it. Derived signals
+are not in the list: they are always drawn behind the signals listed there.
+
+### What stays, and Reset
+
+Moving between runs, files and folders changes the data and nothing else. Names, colours,
+panels, orders, line styles, limits and a title you typed all stay, including across logs with
+different numbers of signals: a signal a log lacks comes back as it was on the next log that has
+it. **Reset…** in the top bar puts everything back to what the log's own files say.
 
 ### Layout
 
@@ -111,7 +116,7 @@ The buttons in the top bar lay out the ticked signals, for one run or several:
 ### The plot
 
 - **Scroll** (or two fingers) zooms time around the pointer, **shift-scroll** zooms y.
-- **Double-click** or **Reset** returns to the full view. **Pan** and **Zoom box** are below
+- **Double-click** or **Full view** returns to the full view. **Pan** and **Zoom box** are below
   the plot.
 - The zoom is kept while stepping through runs and editing settings, so the same window can
   be compared across runs. A limit typed in the Figure or Panels tab replaces it.
@@ -136,29 +141,47 @@ paper however small the figure is. **PNG dpi** sets the resolution of PNG files.
 ## Legends and line styles
 
 Overlaid runs get a legend on the first panel, using only the part of the run names that
-differs (`run 136 q2 2.50`). The **Lines** tab lists every plotted line under its panel, with a
-Legend box per panel. A line's text follows renames until you edit it. Clear the text to leave
-a line out of the legend. Click a line's colour patch to pick its colour. The style menu sets a
-line solid, dashed, dotted or dash-dot; *auto* keeps the view's own choice. **Reset all** puts
-text, colour and style back to automatic. Lines of a single run keep their legend, style and
-colour while stepping through runs, and **Figure → Settings file → Save…** stores them.
+differs (`run 136 q2 2.50`). A run keeps its colour when others join or leave the comparison.
+
+The **Lines** tab starts with the **Run order** while runs are compared. Drag a run to reorder
+it: higher is drawn in front, so a noisy run can go behind the others. Click its patch to change
+the run's colour.
+
+Below that, every plotted line is listed under its panel, with a Legend box per panel. A line's
+text follows renames until you edit it. Clear the text to leave a line out of the legend. Click a
+line's colour patch to pick its colour. The style menu sets a line solid, dashed, dotted or
+dash-dot; *auto* keeps the view's own choice. **Reset all** puts text, colour and style back to
+automatic. Lines of a single run keep their legend, style and colour while stepping through
+runs, and **Figure → Settings file → Save…** stores them.
 
 ## Derived signals
 
 **+ Derived signal** in the Signals tab adds a signal computed from the others, such as
-`deg(pitch) - deg(p_c)`. The names it can use are listed below the table. Derived signals plot
-for a single run in the Overlay layout.
+`2 * ch1 - ch2`. Every logged signal is `ch0`, `ch1` and so on, and a named signal can also be used
+by its name. Derived signals plot for a single run in the Overlay layout.
 
 ## Signal names
 
-A Simulink *To File* log holds only numbers: row 0 is time, then one row per Mux input,
-with no names. Name the signals in the **Signals** tab at any time, then **Save names…**
-writes them to a `signals.json`. A log picks up the `signals.json` in its own folder or
-the nearest folder above it, so one file in `LQR med integral/` names every run below it,
-while a subfolder logged another way can carry its own. A file listing a different
-number of signals than the log has is not applied, and the Signals tab says why. A signal
-whose name is left blank counts as an unused input and starts unticked.
-**Load names…** applies any names file by hand.
+Signals have no name until something names them; until then they show as *Channel 3*. In order:
+
+1. A name you type. It stays until you change it or press **Reset…**.
+2. A `signals.json` in the log's folder or the nearest one above it, so one file can name every
+   run below it. A file listing a different number of signals than the log has is not applied,
+   and the Signals tab says why.
+3. Names inside the `.mat` file, when it has them:
+   - a Simulink *Structure With Time* (`.signals.label`, or `.blockName`)
+   - a cell array or char matrix with one entry per channel, such as `names` or `labels`,
+     beside the data or in the same struct, and optionally `units`
+   - vectors saved one by one at equal length, which become one log named by their variables
+   - struct fields, read the same way
+
+A log with none of these keeps the names already showing. A Simulink *To File* log holds only
+numbers, so it never has names of its own. MATLAB `timeseries` and `table` objects and v7.3 files
+cannot be read by SciPy.
+
+Text such as `pitch [rad]` is split into name and unit. When some signals are named, the blank
+ones count as unused inputs and start unticked. Type names in the **Signals** tab, then
+**Save names…** writes them to a `signals.json`. **Load names…** applies any names file by hand.
 
 ```json
 {"signals": [{"name": "Time", "unit": "s"}, {"name": "Travel", "unit": "rad"}]}

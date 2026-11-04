@@ -6,6 +6,7 @@ import sys
 import tkinter as tk
 import traceback
 from collections import namedtuple
+from contextlib import contextmanager
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
 import numpy as np
@@ -15,12 +16,13 @@ from matplotlib.figure import Figure
 from . import (data, expressions, figure as figure_builder, names as names_module, prefs,
                runs as runs_module, store)
 from .cursor import Crosshair
-from .models import (HIDDEN, LINE_STYLES, XLABEL_MODES, Channel, LineLook, Panel, line_style,
-                     palette_color, parse_float, parse_limit)
+from .models import (HIDDEN, LINE_STYLES, PALETTE, XLABEL_MODES, Channel, LineLook, Panel,
+                     line_style, palette_color, parse_float, parse_limit)
 from .plot_view import PlotGestures, PlotToolbar, ViewMemory
 from .theme import ERROR, INK_2, SURFACE, px
-from .widgets import (Checklist, Tooltip, add_placeholder, divider, heading, labelled_entry,
-                      scrollable, scrolling_tree, segmented, swatch, wrapping_label)
+from .widgets import (Checklist, DragRows, Tooltip, add_placeholder, divider, heading,
+                      labelled_entry, scrollable, scrolling_tree, segmented, swatch,
+                      wrapping_label)
 
 APP_TITLE = "MAT log plotter"
 MAX_PANELS = 16
@@ -59,6 +61,11 @@ DEFAULT_EXPORT_DPI = "300"
 # These use the arrow keys themselves.
 TEXT_WIDGET_CLASSES = ("TEntry", "TCombobox", "TSpinbox", "Entry", "Listbox", "Spinbox")
 INSPECTOR_TABS = ("Signals", "Panels", "Lines", "Figure", "Data")
+DEFAULT_LINE_WIDTH = "1.4"
+SAMPLE_AXIS_LABEL = "Sample"
+CONTROL_MASK = 0x4
+# Tk reports Command as Mod1 on macOS. Elsewhere that bit is Alt or NumLock.
+COMMAND_MASK = 0x8
 
 
 class Keys(namedtuple("Keys", "modifier label")):
@@ -66,6 +73,11 @@ class Keys(namedtuple("Keys", "modifier label")):
 
     def text(self, key):
         return f"{self.label}+{key}"
+
+    @property
+    def add_to_selection_mask(self):
+        """The modifier bits of a click that adds to a selection."""
+        return CONTROL_MASK | (COMMAND_MASK if self.modifier == "Command" else 0)
 
 
 def platform_keys(widget):
@@ -85,7 +97,7 @@ def merged_title(signals):
     """Name every merged signal, with the unit once if they all share it."""
     units = {c.unit.get().strip() for c in signals}
     unit = units.pop() if len(units) == 1 else ""
-    names = " \u00b7 ".join(c.name.get() for c in signals)
+    names = " \u00b7 ".join(c.display_name() for c in signals)
     return f"{names}  [{unit}]" if unit else names
 
 
@@ -116,9 +128,25 @@ class App(ttk.Frame):
         # The signals.json the signal names came from, None when typed or defaulted.
         self.names_path = None
         self.channels = []
+        # Every logged signal seen so far, by index. A log with fewer signals leaves the rest
+        # here, so they come back as they were on the next log that has them.
+        self.known_channels = {}
         # Channel indices as the signal list shows them. self.channels itself stays in matrix
         # order, which names files and saved layouts rely on.
         self.signal_order = []
+        # Compared runs as the Lines tab shows them, and each run's colour once it has one.
+        self.run_rank = []
+        self.run_colors = {}
+        # The title last set automatically. One that differs was typed, and stays.
+        self.auto_title = ""
+        # Set once the user picks these, so that new logs leave them alone.
+        self.time_chosen = False
+        self.orientation_forced = None
+        # The names the current log's file holds, by variable.
+        self.log_names = {}
+        # Which folders were open when the filter was last empty.
+        self.open_folders = set()
+        self.filter_was_on = False
         # Set when the order changes while overlaid, for the panels of the single-run view.
         self._panels_follow_order = False
         self.panels = []
@@ -154,6 +182,8 @@ class App(ttk.Frame):
         # What the Lines tab rows were built for, so typing in them does not rebuild them.
         self.line_rows_shown = None
         self.line_swatches = {}
+        # The runs in the Lines tab's run order, while several are compared.
+        self.compared_runs = []
 
         self.prefs, prefs_problem = self._load_prefs()
         self._place_window()
@@ -186,18 +216,17 @@ class App(ttk.Frame):
         self.orientation = tk.StringVar(value="rows")
         self.time_source = tk.StringVar()
         self.title = tk.StringVar()
-        self.xlabel = tk.StringVar(value="Time [s]")
+        # Blank takes the label of the time signal.
+        self.xlabel = tk.StringVar()
         self.columns = tk.IntVar(value=1)
         self.panel_count = tk.IntVar(value=1)
-        self.linewidth = tk.StringVar(value="1.4")
+        self.linewidth = tk.StringVar(value=DEFAULT_LINE_WIDTH)
         self.auto_x = tk.BooleanVar(value=True)
         self.xmin = tk.StringVar()
         self.xmax = tk.StringVar()
         self.link_x = tk.BooleanVar(value=True)
         self.crosshair_on = tk.BooleanVar(value=True)
-        saved_layout = self.prefs.get("layout")
-        self.run_layout = tk.StringVar(value=saved_layout if saved_layout in
-                                       [choice[0] for choice in LAYOUT_CHOICES] else OVERLAY)
+        self.run_layout = tk.StringVar(value=OVERLAY)
         self.runs_folder = tk.StringVar()
         roomy = self.master.winfo_screenwidth() >= px(INSPECTOR_MIN_WINDOW_WIDTH)
         self.inspector_shown = tk.BooleanVar(value=self.prefs.get("inspector_shown", roomy)
@@ -230,7 +259,7 @@ class App(ttk.Frame):
                     panel.title.set(new)
         if not channel.derived:
             self.refresh_time_sources()
-            self.signal_list.rename(str(channel.index), self._listed_name(channel))
+            self.signal_list.rename(str(channel.index), new)
 
     def _watch(self, variables):
         """Redraw whenever one of these changes, once the edits pause."""
@@ -258,14 +287,18 @@ class App(ttk.Frame):
         layouts.grid(row=0, column=2)
         ttk.Label(layouts, text="Layout", style="Muted.TLabel").pack(side="left", padx=(0, px(8)))
         segmented(layouts, self.run_layout, LAYOUT_CHOICES, self.replot_overlay).pack(side="left")
+        reset = ttk.Button(bar, text="Reset\u2026", command=self.reset_setup)
+        reset.grid(row=0, column=3, padx=(0, px(6)))
+        Tooltip(reset, "Put names, colours, panels, orders and figure settings back to what the "
+                       "log's own file says")
         toggle = ttk.Checkbutton(bar, text="Settings", style="Toggle.Toolbutton",
                                  variable=self.inspector_shown, command=self._apply_inspector,
                                  takefocus=False)
-        toggle.grid(row=0, column=3, padx=(0, px(6)))
+        toggle.grid(row=0, column=4, padx=(0, px(6)))
         Tooltip(toggle, f"Show or hide the settings on the right ({self.keys.label}+\\)")
         export = ttk.Button(bar, text="Export…", style="Accent.TButton",
                             command=self.save_figure)
-        export.grid(row=0, column=4)
+        export.grid(row=0, column=5)
         Tooltip(export, f"Save the figure as PNG, PDF, SVG or EPS ({self.keys.label}+E)")
         divider(self).grid(row=1, column=0, sticky="ew")
 
@@ -348,6 +381,7 @@ class App(ttk.Frame):
         self.run_tree.bind("<Up>", lambda _e: self.step_run(forward=False))
         self.run_tree.bind("<Down>", lambda _e: self.step_run(forward=True))
         self.run_tree.bind("<Shift-Button-1>", self._toggle_item)
+        self.run_tree.bind("<Button-1>", self._click_run_row)
         Tooltip(self.run_tree, self._run_tip)
         self.no_folder = ttk.Label(frame, text="No folder open", style="Muted.TLabel")
         self.no_folder.grid(row=2, column=0)
@@ -412,9 +446,15 @@ class App(ttk.Frame):
         self._fill_empty_state()
 
     def _fill_empty_state(self):
-        """What the plot area offers before anything is loaded."""
+        """What the plot area offers before anything is plotted."""
         for widget in self.empty_content.winfo_children():
             widget.destroy()
+        if self.runs:
+            ttk.Label(self.empty_content, text="Pick a run",
+                      style="Display.TLabel").pack(pady=(0, px(4)))
+            ttk.Label(self.empty_content, text="Choose a run from the list on the left to plot "
+                                               "it.", style="Muted.TLabel").pack()
+            return
         ttk.Label(self.empty_content, text="Plot your MATLAB logs",
                   style="Display.TLabel").pack(pady=(0, px(4)))
         ttk.Label(self.empty_content, text="Open a folder to browse and compare every run in "
@@ -422,9 +462,9 @@ class App(ttk.Frame):
                   style="Muted.TLabel").pack(pady=(0, px(14)))
         buttons = ttk.Frame(self.empty_content)
         buttons.pack()
-        ttk.Button(buttons, text="Open folder…", style="Accent.TButton",
+        ttk.Button(buttons, text="Open folder\u2026", style="Accent.TButton",
                    command=self.open_folder).pack(side="left", padx=px(3))
-        ttk.Button(buttons, text="Open file…", command=self.open_file).pack(
+        ttk.Button(buttons, text="Open file\u2026", command=self.open_file).pack(
             side="left", padx=px(3))
         recent = prefs.existing_recent(self.prefs)
         if recent:
@@ -487,13 +527,13 @@ class App(ttk.Frame):
         orient.grid(row=2, column=1, sticky="w", pady=px(2))
         for text in ("rows", "columns"):
             ttk.Radiobutton(orient, text=text, value=text, variable=self.orientation,
-                            command=self.rebuild_channels).pack(side="left", padx=(0, px(10)))
+                            command=self._orientation_chosen).pack(side="left", padx=(0, px(10)))
 
         ttk.Label(box, text="Time from", style="Muted.TLabel").grid(row=3, column=0, sticky="w",
                                                                     padx=(0, px(8)))
         self.time_box = ttk.Combobox(box, textvariable=self.time_source, state="readonly")
         self.time_box.grid(row=3, column=1, sticky="ew", pady=px(2))
-        self.time_box.bind("<<ComboboxSelected>>", lambda _e: self.draw())
+        self.time_box.bind("<<ComboboxSelected>>", lambda _e: self._time_chosen())
 
         self.shape_label = ttk.Label(box, text="", style="Small.TLabel")
         self.shape_label.grid(row=4, column=0, columnspan=2, sticky="w", pady=(px(6), 0))
@@ -504,8 +544,7 @@ class App(ttk.Frame):
         buttons.grid(row=0, column=0, sticky="ew")
         derived = ttk.Button(buttons, text="+ Derived signal", command=self.add_derived)
         derived.pack(side="left")
-        Tooltip(derived, "A new signal computed from the others, for example "
-                         "deg(pitch) - deg(p_c)")
+        Tooltip(derived, "A new signal computed from the others, for example 2 * ch1 - ch2")
         ttk.Button(buttons, text="One panel each", command=self.one_panel_each).pack(
             side="left", padx=px(6))
         holder, self.signal_frame = scrollable(frame)
@@ -587,7 +626,8 @@ class App(ttk.Frame):
         body.columnconfigure(1, weight=1)
         heading(body, "Figure").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, px(6)))
         labelled_entry(body, 1, "Title", self.title)
-        labelled_entry(body, 2, "X label", self.xlabel)
+        add_placeholder(labelled_entry(body, 2, "X label", self.xlabel), self.xlabel,
+                        "From the time signal")
         ttk.Label(body, text="Line width", style="Muted.TLabel").grid(row=3, column=0, sticky="w")
         ttk.Entry(body, textvariable=self.linewidth, width=6).grid(row=3, column=1, sticky="w",
                                                                    pady=px(2))
@@ -682,6 +722,8 @@ class App(ttk.Frame):
                          command=self.toolbar.home)
         view.add_command(label="Rescan Folder", accelerator=self.keys.text("R"),
                          command=self.scan_runs)
+        view.add_separator()
+        view.add_command(label="Reset Setup\u2026", command=self.reset_setup)
 
         helping = tk.Menu(bar, tearoff=False)
         bar.add_cascade(label="Help", menu=helping)
@@ -742,14 +784,19 @@ class App(ttk.Frame):
             "Runs",
             "  ↑ ↓: step through the runs",
             f"  {self.keys.label}-click or Shift-click: add or drop a run",
-            "  Click a folder: select every run in it",
+            "  Click a folder: open or close it",
+            f"  {self.keys.label}-click a folder: select every run in it",
             f"  {key('F')}: filter the runs, Esc clears it",
             f"  {key('1')}…{key('4')}: choose the layout",
             "",
             "Files",
             f"  {key('O')}: open a file    {key('Shift+O')}: open a folder",
             f"  {key('E')}: export the figure    {key('S')}: save settings",
-            f"  {key('R')}: rescan the folder    {key(chr(92))}: settings pane")))
+            f"  {key('R')}: rescan the folder    {key(chr(92))}: settings pane",
+            "",
+            "Order",
+            "  Drag a signal's handle to reorder it. Higher is drawn in front.",
+            "  Compared runs are reordered at the top of the Lines tab.")))
 
     # Remembering the session.
 
@@ -776,7 +823,7 @@ class App(ttk.Frame):
     def quit_app(self):
         root = self.master
         self.prefs.update(
-            geometry=root.geometry(), layout=self.run_layout.get(),
+            geometry=root.geometry(),
             sidebar_width=self.split.sashpos(0), inspector_shown=self.inspector_shown.get(),
             inspector_tab=self.inspector_tab.get(), export_preset=self.export_preset.get(),
             export_width=self.export_width.get(), export_height=self.export_height.get(),
@@ -812,19 +859,41 @@ class App(ttk.Frame):
         if not path:
             return
         try:
-            self.arrays = data.load_arrays(path)
+            log = data.load_log(path)
         except (OSError, ValueError) as exc:
             messagebox.showerror("Cannot read file", f"{path}\n\n{exc}")
             return
-        self.path = path
+        overlaid = self.overlay is not None
+        ticked = set(self.signal_list.checked())
         self.forget_runs()
         self.file_run = runs_module.Run(path, os.path.dirname(path))
         self._remember_recent(path)
+        with self._one_redraw():
+            self._show_log(log, path, self.file_run.label)
+            if overlaid:
+                self._back_to_single_view(ticked)
+        self.draw()
+
+    def _show_log(self, log, path, title):
+        """Make this log the current one. Everything the user has set up stays."""
+        self.overlay = None
+        self.overlay_layout = None
+        self.run_matrices = {}
+        self.arrays = log.arrays
+        self.log_names = log.names
+        self.path = path
         self._show_file_name(path)
-        self.variable_box.configure(values=list(self.arrays))
-        self.variable.set(next(iter(self.arrays)))
-        self.title.set(os.path.basename(path))
+        self.variable_box.configure(values=list(log.arrays))
+        if self.variable.get() not in log.arrays:
+            self.variable.set(next(iter(log.arrays)))
+        self._set_auto_title(title)
         self.select_variable()
+
+    def _set_auto_title(self, title):
+        """Set the figure title, unless the user has typed their own."""
+        if self.title.get() == self.auto_title:
+            self.title.set(title)
+        self.auto_title = title
 
     def _show_file_name(self, path):
         name = os.path.basename(path)
@@ -833,13 +902,33 @@ class App(ttk.Frame):
 
     def select_variable(self):
         """Point at a variable and orient it so the short dimension holds the channels."""
-        self.orientation.set(data.natural_orientation(self.arrays[self.variable.get()]))
+        array = self.arrays[self.variable.get()]
+        self.orientation.set(self.orientation_forced or data.natural_orientation(array))
         self.rebuild_channels()
+
+    def _orientation_chosen(self):
+        self.orientation_forced = self.orientation.get()
+        self.rebuild_channels()
+
+    def _time_chosen(self):
+        self.time_chosen = True
+        self.draw()
 
     def matrix(self):
         return data.orient(self.arrays[self.variable.get()], self.orientation.get())
 
+    @contextmanager
+    def _one_redraw(self):
+        """Let several steps each ask for a redraw, without drawing until the caller does."""
+        held = self._draw_held
+        self._draw_held = True
+        try:
+            yield
+        finally:
+            self._draw_held = held
+
     def rebuild_channels(self):
+        """Fit the signals to the current log, keeping whatever is set up for them."""
         if not self.arrays or not self.variable.get():
             return
         matrix = self.matrix()
@@ -853,31 +942,59 @@ class App(ttk.Frame):
             return
         self.applied_orientation = self.orientation.get()
 
-        self.channels = [Channel(f"Signal {i}", palette_color(i), index=i,
-                                 expression=f"channel {i}")
-                         for i in range(matrix.shape[0])]
-        self.views.forget()
-        self.signal_order = self._saved_signal_order(len(self.channels))
-        # Looks belong to the channels just replaced.
-        self.line_looks = {}
-        for channel in self.channels:
-            self._adopt(channel)
-        self.refresh_time_sources()
-        first_is_time = len(self.channels) > 1 and data.is_time_like(matrix[0])
-        self.time_source.set(self.time_box.cget("values")[1 if first_is_time else 0])
-        self.shape_label.configure(
-            text=f"{matrix.shape[0]} channels × {matrix.shape[1]} samples")
-        # The channels were just made with default names, so whatever file named the
-        # old ones no longer applies.
-        self.names_path = None
+        fresh = not self.channels
+        before = len(self.raw_channels())
+        added = self._fit_channels(matrix.shape[0])
         self.apply_names_for(self.path)
-        self.one_panel_each()
+        self.refresh_time_sources()
+        if not self.time_chosen:
+            self._detect_time(matrix)
+        self.shape_label.configure(
+            text=f"{matrix.shape[0]} channels \u00d7 {matrix.shape[1]} samples")
+        if fresh:
+            self.one_panel_each()
+            return
+        for channel in added:
+            if self._plots_by_default(channel):
+                self._give_panel(channel)
+        if added or before != matrix.shape[0]:
+            self.draw_panel_rows()
+            self.draw_signal_rows()
+        self.draw()
+
+    def _fit_channels(self, count):
+        """Make self.channels cover `count` logged signals. Returns those never seen before."""
+        added = []
+        for index in range(count):
+            if index not in self.known_channels:
+                channel = Channel("", palette_color(index), index=index,
+                                  expression=f"channel {index}", panel=HIDDEN)
+                self._adopt(channel)
+                self.known_channels[index] = channel
+                added.append(channel)
+        derived = [c for c in self.channels if c.derived]
+        self.channels = [self.known_channels[index] for index in range(count)] + derived
+        return added
+
+    def _every_channel(self):
+        """The signals of this log and the ones waiting for a log that has them."""
+        return list(self.known_channels.values()) + [c for c in self.channels if c.derived]
+
+    def _detect_time(self, matrix):
+        row = data.time_row(matrix, [c.name.get() for c in self.raw_channels()])
+        self.time_source.set(self.time_box.cget("values")[0 if row is None else row + 1])
+
+    def _plots_by_default(self, channel):
+        """Not the time vector. If some signals are named, a blank name marks an unused input."""
+        any_named = any(c.name.get().strip() for c in self.raw_channels())
+        return channel.index != self.time_index() and (
+            channel.name.get().strip() or channel.derived or not any_named)
 
     def refresh_time_sources(self):
         # Track the choice by channel index: the labels change whenever signals are renamed.
         keep = self.time_index()
-        sources = ["Sample index"] + [f"{i}: {c.name.get()}"
-                                      for i, c in enumerate(self.channels) if not c.derived]
+        sources = ["Sample index"] + [f"{c.index}: {c.display_name()}"
+                                      for c in self.raw_channels()]
         self.time_box.configure(values=sources)
         self.time_source.set(sources[keep + 1] if keep is not None and keep + 1 < len(sources)
                              else sources[0])
@@ -892,26 +1009,7 @@ class App(ttk.Frame):
         self.runs_folder.set(folder)
         self.run_tree.selection_set(())
         if self.scan_runs():
-            self._remember(folder=os.path.abspath(folder))
             self._remember_recent(folder)
-            self._select_first_run()
-
-    def reopen_last_folder(self):
-        """Carry on where the last session stopped, else use a runs/ folder next to the app."""
-        last = self.prefs.get("folder")
-        beside = os.path.join(os.getcwd(), "runs")
-        if isinstance(last, str) and os.path.isdir(last):
-            self.open_folder(last)
-        elif os.path.isdir(beside):
-            self.open_folder(beside)
-        elif isinstance(last, str):
-            self.status.configure(text=f"The last folder is gone: {last}", foreground=INK_2)
-
-    def _select_first_run(self):
-        first = next(iter(self.run_items), None)
-        if first is not None:
-            self.run_tree.selection_set(first)
-            self.run_tree.focus(first)
 
     def scan_runs(self):
         """Look through the folder again. Returns whether it held any runs."""
@@ -929,6 +1027,7 @@ class App(ttk.Frame):
         self.run_matrices = {}
         self.fill_run_tree()
         self.no_folder.grid_remove()
+        self._fill_empty_state()
         self.folder_label.configure(text=os.path.basename(os.path.normpath(folder)))
         folders = len({run.folder for run in self.runs})
         self.status.configure(text=f"{len(self.runs)} runs in {folders} folders under {folder}",
@@ -939,8 +1038,13 @@ class App(ttk.Frame):
         """The runs the filter lets through, under their folders, keeping the selection."""
         tree = self.run_tree
         kept = tree.selection()
-        tree.delete(*tree.get_children())
         text = self.run_filter.get().strip()
+        # A filter opens every folder to show its matches, which is not the user's choice.
+        if not self.filter_was_on:
+            self.open_folders = {item for item in self._tree_order()
+                                 if item.startswith(FOLDER_PREFIX) and tree.item(item, "open")}
+        self.filter_was_on = bool(text)
+        tree.delete(*tree.get_children())
         self.run_items = {}
         for run in self.runs:
             if text and not run.matches(text):
@@ -977,8 +1081,19 @@ class App(ttk.Frame):
         item = FOLDER_PREFIX + folder
         if not self.run_tree.exists(item):
             parent, _slash, name = folder.rpartition("/")
-            self.run_tree.insert(self._folder_item(parent), "end", iid=item, text=name, open=True)
+            self.run_tree.insert(self._folder_item(parent), "end", iid=item, text=name,
+                                 open=self.filter_was_on or item in self.open_folders)
         return item
+
+    def _click_run_row(self, event):
+        """A click on a folder opens or closes it; adding it to the selection takes a modifier."""
+        tree = self.run_tree
+        item = tree.identify_row(event.y)
+        if not item.startswith(FOLDER_PREFIX) or event.state & self.keys.add_to_selection_mask:
+            return None
+        tree.item(item, open=not tree.item(item, "open"))
+        tree.focus(item)
+        return "break"
 
     def _tree_order(self, item=""):
         """Every item below `item`, in the order the tree shows them."""
@@ -1043,11 +1158,8 @@ class App(ttk.Frame):
             shown = self.plot_overlay(chosen)
         elif self.run_layout.get() != OVERLAY:
             # Loading first gives the run its names and the layout to return to.
-            self._draw_held = True
-            try:
+            with self._one_redraw():
                 loaded = self.load_run(chosen[0])
-            finally:
-                self._draw_held = False
             shown = loaded and self.plot_overlay(chosen)
         else:
             shown = self.load_run(chosen[0])
@@ -1066,60 +1178,55 @@ class App(ttk.Frame):
         self.run_tree.selection_set(())
 
     def load_run(self, run):
-        """Show one run on its own. Returns whether it could be read."""
+        """Show one run on its own, as set up so far. Returns whether it could be read."""
         try:
-            arrays = data.load_arrays(run.path)
+            log = data.load_log(run.path)
         except (OSError, ValueError) as exc:
             self.status.configure(text=f"Cannot load {run.label}: {exc}", foreground=ERROR)
             return False
-        variable = next(iter(arrays))
-        matrix = data.orient(arrays[variable], data.natural_orientation(arrays[variable]))
-        # Stepping through runs keeps the names, panels and expressions already set up,
-        # as long as the new log has the same channels.
-        keep = bool(self.channels) and matrix.shape[0] == sum(
-            1 for c in self.channels if not c.derived)
-
-        leaving_overlay = self.overlay is not None
-        self.arrays = arrays
-        self.path = run.path
+        variable = self.variable.get() if self.variable.get() in log.arrays else next(
+            iter(log.arrays))
+        array = log.arrays[variable]
+        rows = data.orient(array, self.orientation_forced
+                           or data.natural_orientation(array)).shape[0]
+        if rows > data.MAX_CHANNELS:
+            self.status.configure(text=f"Cannot load {run.label}: '{variable}' has {rows} "
+                                       f"channels, the limit is {data.MAX_CHANNELS}.",
+                                  foreground=ERROR)
+            return False
+        overlaid = self.overlay is not None
+        ticked = set(self.signal_list.checked())
         self.current_run = run
-        self.overlay = None
-        self.overlay_layout = None
-        self.run_matrices = {}
-        self._show_file_name(run.path)
-        self.variable_box.configure(values=list(arrays))
         self.variable.set(variable)
-        self.title.set(run.label)
-        if keep:
-            self.orientation.set(data.natural_orientation(arrays[variable]))
-            self.applied_orientation = self.orientation.get()
-            self.shape_label.configure(
-                text=f"{matrix.shape[0]} channels \u00d7 {matrix.shape[1]} samples")
-            if leaving_overlay:
-                # The ticks stay as they are: what was being compared stays on screen.
-                ticked = set(self.signal_list.checked())
-                self.show_single_layout()
-                if ticked:
-                    self._plot_ticked(ticked)
-            # Another folder may hold another signals.json, logged with another layout.
-            self.apply_names_for(run.path)
-            self.draw()
-        else:
-            self.select_variable()
+        with self._one_redraw():
+            self._show_log(log, run.path, run.label)
+            if overlaid:
+                self._back_to_single_view(ticked)
+        self.draw()
         return True
 
+    def _back_to_single_view(self, ticked):
+        """Leave a comparison. The ticks stay as they are, so the same signals stay on screen."""
+        self.show_single_layout()
+        if ticked:
+            self._plot_ticked(ticked)
+
     def show_single_layout(self):
-        """Put back the panels that were in use before the runs were overlaid."""
-        if not self.single_layout or len(self.single_layout[0]) != len(self.channels):
+        """Put back the panels in use before the runs were overlaid. Nothing else changes."""
+        if not self.single_layout:
             self.one_panel_each()
             return
-        channels, panels, columns = self.single_layout
+        assignments, panels, columns = self.single_layout
         self.columns.set(columns)
         self._resize_panels(len(panels))
         for panel, saved in zip(self.panels, panels):
             panel.restore(saved)
-        for channel, saved in zip(self.channels, channels):
-            channel.restore(saved)
+        for channel in self._every_channel():
+            number, label = assignments.get(channel.uid, (HIDDEN, ""))
+            channel.panel.set(number)
+            # A rename made while overlaid has to reach the titles coming back.
+            if number != HIDDEN and self.panels[int(number) - 1].title.get() == label:
+                self.panels[int(number) - 1].title.set(channel.label())
         if self._panels_follow_order:
             self._arrange_panels_by_order()
             self._panels_follow_order = False
@@ -1127,14 +1234,10 @@ class App(ttk.Frame):
         self.draw_signal_rows()
         self.draw()
 
-    @staticmethod
-    def _listed_name(channel):
-        return channel.label() or f"Channel {channel.index}"
-
     def refresh_signal_list(self):
         """The signal list, keeping the ticks while runs are overlaid."""
         kept = set(self.signal_list.checked())
-        self.signal_list.set_items([(str(c.index), self._listed_name(c), c.color.get())
+        self.signal_list.set_items([(str(c.index), c.label(), c.color.get())
                                     for c in self.ordered_raw_channels()])
         self.signal_list.set_checked(kept if self.overlay else self._plotted_keys())
 
@@ -1194,8 +1297,9 @@ class App(ttk.Frame):
             if shown and not wanted:
                 channel.panel.set(HIDDEN)
             elif wanted and not shown and not self._give_panel(channel):
-                self.status.configure(text=f"Only {MAX_PANELS} panels fit; {channel.name.get()} "
-                                           "was left out.", foreground=ERROR)
+                self.status.configure(text=f"Only {MAX_PANELS} panels fit; "
+                                           f"{channel.display_name()} was left out.",
+                                      foreground=ERROR)
         self._trim_panels()
         self.draw_panel_rows()
         self.draw_signal_rows()
@@ -1203,7 +1307,7 @@ class App(ttk.Frame):
 
     def _give_panel(self, channel):
         """Put the channel on the first unused panel. Returns False when none can be added."""
-        used = {c.panel.get() for c in self.channels}
+        used = {c.panel.get() for c in self._every_channel()}
         panel = next((p for p in self.panels if str(p.number) not in used), None)
         if panel is None:
             if len(self.panels) >= MAX_PANELS:
@@ -1216,7 +1320,7 @@ class App(ttk.Frame):
 
     def _trim_panels(self):
         """Drop unused panels from the end, so the Panels tab lists what is on screen."""
-        used = {c.panel.get() for c in self.channels}
+        used = {c.panel.get() for c in self._every_channel()}
         count = len(self.panels)
         while count > 1 and str(count) not in used:
             count -= 1
@@ -1225,7 +1329,6 @@ class App(ttk.Frame):
     def on_signal_reorder(self, keys):
         """A signal was dragged: it changes what is in front, and the order of the panels."""
         self.signal_order = [int(key) for key in keys]
-        self._remember_signal_order()
         if self.overlay:
             self._panels_follow_order = True
             self.plot_overlay(self.overlay[0])
@@ -1247,7 +1350,7 @@ class App(ttk.Frame):
         arranged = [by_number[number] for number in numbers] + unused
         renumbered = {str(panel.number): str(position)
                       for position, panel in enumerate(arranged, start=1)}
-        for channel in self.channels:
+        for channel in self._every_channel():
             if channel.panel.get() != HIDDEN:
                 channel.panel.set(renumbered[channel.panel.get()])
         for position, panel in enumerate(arranged, start=1):
@@ -1260,18 +1363,6 @@ class App(ttk.Frame):
         return (isinstance(order, list) and all(type(i) is int for i in order)
                 and sorted(order) == list(range(count)))
 
-    def _saved_signal_order(self, count):
-        """The order last used for logs with this many channels, else matrix order."""
-        saved = self.prefs.get("signal_orders")
-        order = saved.get(str(count)) if isinstance(saved, dict) else None
-        return order if self._valid_order(order, count) else list(range(count))
-
-    def _remember_signal_order(self):
-        saved = self.prefs.get("signal_orders")
-        orders = dict(saved) if isinstance(saved, dict) else {}
-        orders[str(len(self.signal_order))] = self.signal_order
-        self._remember(signal_orders=orders)
-
     def _pick_listed_color(self, key):
         self.pick_color(next(c for c in self.channels if str(c.index) == key and not c.derived))
 
@@ -1280,6 +1371,7 @@ class App(ttk.Frame):
         # The signal names and panels come from a loaded log, so the first run sets them up.
         if not self.channels and not self.load_run(chosen[0]):
             return False
+        chosen = self._ordered_runs(chosen)
         signals = self.overlay_signals()
         layout = self.run_layout.get()
         panel_count = {OVERLAY: len(signals), MERGED: 1, GRID: len(signals) * len(chosen),
@@ -1297,11 +1389,18 @@ class App(ttk.Frame):
             self.status.configure(text=f"Cannot overlay runs: {exc}", foreground=ERROR)
             return False
         if not self.overlay:
-            self.single_layout = ([c.state() for c in self.channels],
+            self.single_layout = ({c.uid: (c.panel.get(), c.label())
+                                   for c in self._every_channel()},
                                   [p.state() for p in self.panels], int(self.columns.get()))
         self.run_matrices = matrices
+        self._give_runs_colors(chosen)
+        # Compared logs can hold different numbers of signals; the list shows the most.
+        rows = max(matrix.shape[0] for matrix in matrices.values())
+        if rows != len(self.raw_channels()):
+            self._fit_channels(rows)
+            self.draw_signal_rows()
         self.overlay = (chosen, signals)
-        self.title.set(chosen[0].label if len(chosen) == 1 else overlay_title(chosen))
+        self._set_auto_title(chosen[0].label if len(chosen) == 1 else overlay_title(chosen))
         # Grid and side by side have a column per run, so there the runs shape the panels too.
         shape = (tuple(c.index for c in signals), layout,
                  tuple(run.path for run in chosen) if layout in (GRID, SIDE_BY_SIDE) else ())
@@ -1348,6 +1447,31 @@ class App(ttk.Frame):
                 # Every panel has the same runs, so one legend says it for all of them.
                 panel.legend.set(position == 0)
 
+    def _ordered_runs(self, chosen):
+        """These runs as ordered in the Lines tab. Runs not yet moved keep their list order."""
+        rank = {path: position for position, path in enumerate(self.run_rank)}
+        return sorted(chosen, key=lambda run: rank.get(run.path, len(rank)))
+
+    def _give_runs_colors(self, chosen):
+        """A run keeps its colour when others join or leave the comparison."""
+        taken = {self.run_colors[run.path] for run in chosen if run.path in self.run_colors}
+        free = [color for color in PALETTE if color not in taken]
+        for run in chosen:
+            if run.path not in self.run_colors:
+                self.run_colors[run.path] = (free.pop(0) if free
+                                             else palette_color(len(self.run_colors)))
+
+    def on_run_reorder(self, paths):
+        """A compared run was dragged: higher is drawn in front, and comes first in the legend."""
+        self.run_rank = paths + [path for path in self.run_rank if path not in paths]
+        self.plot_overlay(self.overlay[0])
+
+    def _pick_run_color(self, path):
+        chosen = colorchooser.askcolor(color=self.run_colors[path], title="Run colour")[1]
+        if chosen:
+            self.run_colors[path] = chosen
+            self.draw()
+
     def replot_overlay(self):
         """The layout decides the panels, and for a single run whether it is overlaid at all."""
         self.shown_runs = ()
@@ -1355,11 +1479,12 @@ class App(ttk.Frame):
 
     def _run_matrix(self, run):
         try:
-            arrays = data.load_arrays(run.path)
+            arrays = data.load_log(run.path).arrays
         except ValueError as exc:
             raise ValueError(f"{run.label}: {exc}")
-        array = arrays[next(iter(arrays))]
-        return data.orient(array, data.natural_orientation(array))
+        variable = self.variable.get()
+        array = arrays[variable if variable in arrays else next(iter(arrays))]
+        return data.orient(array, self.orientation_forced or data.natural_orientation(array))
 
     # ---------- signals tab ----------
 
@@ -1376,8 +1501,9 @@ class App(ttk.Frame):
         for channel in self.ordered_channels():
             swatch(self.signal_frame, channel.color.get(),
                    lambda c=channel: self.pick_color(c)).grid(row=row, column=0, padx=(0, px(4)))
-            ttk.Entry(self.signal_frame, textvariable=channel.name, width=8).grid(
-                row=row, column=1, padx=px(1), pady=px(1), sticky="ew")
+            name = ttk.Entry(self.signal_frame, textvariable=channel.name, width=8)
+            name.grid(row=row, column=1, padx=px(1), pady=px(1), sticky="ew")
+            add_placeholder(name, channel.name, channel.display_name())
             ttk.Entry(self.signal_frame, textvariable=channel.unit, width=5).grid(
                 row=row, column=2, padx=px(1))
             ttk.Combobox(self.signal_frame, textvariable=channel.panel, values=choices,
@@ -1407,15 +1533,18 @@ class App(ttk.Frame):
             self.expression_help.configure(text="")
             self.expression_help.grid_remove()
             return
-        usable = ", ".join(expressions.identifier(c.name.get()) for c in self.raw_channels()
-                           if c.name.get().strip())
+        named = [expressions.identifier(c.name.get()) for c in self.raw_channels()
+                 if c.name.get().strip()]
+        count = len(self.raw_channels())
+        usable = ", ".join(["t", f"ch0 to ch{count - 1}"] + named)
         self.expression_help.grid()
         self.expression_help.configure(
-            text=f"Expressions can use t, {usable}, and sin cos tan exp log sqrt abs clip where "
+            text=f"Expressions can use {usable}, and sin cos tan exp log sqrt abs clip where "
                  "cumsum deg rad deriv(x) smooth(x, n).")
 
     def pick_color(self, channel):
-        chosen = colorchooser.askcolor(color=channel.color.get(), title=channel.name.get())[1]
+        chosen = colorchooser.askcolor(color=channel.color.get(),
+                                       title=channel.display_name())[1]
         if chosen:
             channel.color.set(chosen)
             self.draw_signal_rows()
@@ -1426,8 +1555,7 @@ class App(ttk.Frame):
             messagebox.showinfo("No file", "Open a .mat file first.")
             return
         position = len(self.channels)
-        channel = Channel(f"Derived {position}", palette_color(position),
-                          expression="t * 0", panel=HIDDEN)
+        channel = Channel("", palette_color(position), panel=HIDDEN)
         self._adopt(channel)
         self.channels.append(channel)
         if not self.overlay:
@@ -1439,7 +1567,6 @@ class App(ttk.Frame):
         self._show_inspector_tab("Signals")
         entry = self.expression_entries[channel.uid]
         entry.focus_set()
-        entry.selection_range(0, "end")
         self.status.configure(text="Type an expression for the new signal. It plots once you "
                                    "stop typing.", foreground=INK_2)
 
@@ -1451,14 +1578,11 @@ class App(ttk.Frame):
         self.draw()
 
     def one_panel_each(self):
-        """Give every plottable signal its own panel — the default view."""
-        time_index = self.time_index()
-        # A name left blank in signals.json marks an unused Mux input.
-        plotted = [c for c in self.ordered_channels()
-                   if c.index != time_index and c.name.get().strip()]
+        """Give every plottable signal its own panel."""
+        plotted = [c for c in self.ordered_channels() if self._plots_by_default(c)]
         self.panel_count.set(max(1, min(len(plotted), MAX_PANELS)))
         self.set_panel_count()
-        for channel in self.channels:
+        for channel in self._every_channel():
             channel.panel.set(HIDDEN)
         for position, channel in enumerate(plotted[:MAX_PANELS]):
             channel.panel.set(str(position + 1))
@@ -1479,28 +1603,39 @@ class App(ttk.Frame):
         return self.ordered_raw_channels() + [c for c in self.channels if c.derived]
 
     def apply_names_for(self, path):
-        """Name the logged signals from the signals.json nearest above `path`."""
+        """Name the signals from the signals.json nearest above `path`, else from the log itself.
+
+        Neither one has names for a log? Then the ones already showing stay. A name typed by
+        hand always stays.
+        """
+        problem = ""
         found = names_module.find(os.path.dirname(path))
-        if found is None:
-            # Names read from a file that does not cover this log describe another layout.
-            if self.names_path:
-                self._set_names([(f"Signal {c.index}", "") for c in self.raw_channels()])
-                self.names_path = None
-            self.names_label.configure(
-                text=f"No {names_module.NAMES_FILE} at or above this log. Name the signals "
-                     "below and use Save names\u2026 to keep them.", foreground=INK_2)
+        if found:
+            try:
+                pairs = names_module.load(found)
+                self._check_name_count(found, pairs)
+            except (OSError, ValueError) as exc:
+                problem = f"Not applied: {exc}"
+            else:
+                self._follow_names(pairs)
+                self.names_path = found
+                self.names_label.configure(text=f"Names from {found}", foreground=INK_2)
+                return
+        embedded = self.log_names.get(self.variable.get())
+        self.names_path = None
+        if embedded and len(embedded) == len(self.raw_channels()):
+            self._follow_names(embedded)
+            self.names_label.configure(text=problem or "Names from the log file.",
+                                       foreground=ERROR if problem else INK_2)
             return
-        if found == self.names_path:
-            return
-        try:
-            pairs = names_module.load(found)
-            self._check_name_count(found, pairs)
-        except (OSError, ValueError) as exc:
-            self.names_label.configure(text=f"Not applied: {exc}", foreground=ERROR)
-            return
-        self._set_names(pairs)
-        self.names_path = found
-        self.names_label.configure(text=f"Names from {found}", foreground=INK_2)
+        self.names_label.configure(
+            text=problem or "This log holds no signal names. Type them above; Save names\u2026 "
+                            f"as {names_module.NAMES_FILE} keeps them for the folder.",
+            foreground=ERROR if problem else INK_2)
+
+    def _follow_names(self, pairs):
+        for channel, (name, unit) in zip(self.raw_channels(), pairs):
+            channel.take_file_name(name, unit)
 
     def _check_name_count(self, path, pairs):
         count = len(self.raw_channels())
@@ -1509,8 +1644,7 @@ class App(ttk.Frame):
 
     def _set_names(self, pairs):
         for channel, (name, unit) in zip(self.raw_channels(), pairs):
-            channel.name.set(name)
-            channel.unit.set(unit)
+            channel.force_name(name, unit)
 
     def _names_folder(self):
         """Where Save names… starts: the file in use, else the run's experiment folder."""
@@ -1577,7 +1711,7 @@ class App(ttk.Frame):
             self._watch(panel.variables())
             self.panels.append(panel)
         del self.panels[count:]
-        for channel in self.channels:
+        for channel in self._every_channel():
             if channel.panel.get() != HIDDEN and int(channel.panel.get()) > count:
                 channel.panel.set(HIDDEN)
 
@@ -1624,18 +1758,25 @@ class App(ttk.Frame):
         matrix = self.matrix()
         t = self.time_vector(matrix)
         namespace = expressions.make_namespace(t, {})
-        for channel in self.channels:
-            if not channel.derived:
+        for channel in self.raw_channels():
+            namespace[f"ch{channel.index}"] = matrix[channel.index]
+            if channel.name.get().strip():
                 namespace[expressions.identifier(channel.name.get())] = matrix[channel.index]
         values = {}
         for channel in self.channels:
             raw = (matrix[channel.index] if not channel.derived
-                   else expressions.evaluate(channel.expression.get(), namespace,
-                                             channel.name.get()))
-            if channel.derived:
+                   else self._derived_values(channel, namespace, t))
+            if channel.derived and channel.name.get().strip():
                 namespace[expressions.identifier(channel.name.get())] = raw
             values[id(channel)] = channel.transform(raw)
         return t, values
+
+    @staticmethod
+    def _derived_values(channel, namespace, t):
+        """A derived signal with no expression yet plots nothing, rather than failing."""
+        if not channel.expression.get().strip():
+            return np.full(len(t), np.nan)
+        return expressions.evaluate(channel.expression.get(), namespace, channel.display_name())
 
     def schedule_draw(self, *_trace):
         if self._pending_draw:
@@ -1651,6 +1792,7 @@ class App(ttk.Frame):
         self.empty_state.grid_remove()
         previous_lines = self.drawn_lines
         self.drawn_lines = []
+        self.compared_runs = []
         try:
             self._draw_overlay() if self.overlay else self._draw()
         except ValueError as exc:
@@ -1685,6 +1827,7 @@ class App(ttk.Frame):
         chosen, signals = self.overlay
         layout = self.run_layout.get()
         merged = layout == MERGED
+        self.compared_runs = chosen if len(chosen) > 1 else []
         # One run has no other runs to tell apart, so its lines keep their signal colours.
         single = len(chosen) == 1
         index = self.time_index()
@@ -1695,28 +1838,30 @@ class App(ttk.Frame):
         series = {id(p): [] for p in self.panels}
         for position, run in enumerate(chosen):
             matrix = self.run_matrices[run.path]
-            needed = max([c.index for c in signals] + ([index] if index is not None else []))
-            if needed >= matrix.shape[0]:
+            if index is not None and index >= matrix.shape[0]:
                 raise ValueError(f"run {run.name} has only {matrix.shape[0]} channels, "
-                                 f"channel {needed} was asked for")
+                                 f"time was asked for from channel {index}")
             t = np.arange(matrix.shape[1], dtype=float) if index is None else matrix[index]
             for order, channel in enumerate(signals):
+                # Compared logs can differ in length; a shorter one has no line for this signal.
+                if channel.index >= matrix.shape[0]:
+                    continue
                 panel = self.panels[{OVERLAY: order, MERGED: 0,
                                      GRID: order * len(chosen) + position,
                                      SIDE_BY_SIDE: position}[layout]]
                 # Side by side, the panel already names the run, and every panel colours
                 # the same signal alike.
                 if single or layout == SIDE_BY_SIDE:
-                    label, color, style = channel.name.get(), channel.color.get(), "-"
+                    label, color, style = channel.display_name(), channel.color.get(), "-"
                 else:
                     label = (short[run.path] if layout == OVERLAY
-                             else f"{short[run.path]} \u00b7 {channel.name.get()}")
-                    color = palette_color(position)
+                             else f"{short[run.path]} \u00b7 {channel.display_name()}")
+                    color = self.run_colors[run.path]
                     style = line_style(dash_rank[channel.index]) if merged else "-"
                 key = ("" if single else run.path, channel.uid)
                 series[id(panel)].append(self._line(
                     panel, key, label, color, style, t, channel.transform(matrix[channel.index]),
-                    order))
+                    order + position / len(chosen)))
         drawn = self._render(series)
         if not drawn:
             return
@@ -1732,7 +1877,8 @@ class App(ttk.Frame):
         # Everything that can be mistyped is read first, so a bad value leaves the plot up.
         auto_x = self.auto_x.get()
         settings = {
-            "title": self.title.get(), "xlabel": self.xlabel.get(),
+            "title": self.title.get(),
+            "xlabel": self.xlabel.get().strip() or self._time_axis_label(),
             "linewidth": parse_float(self.linewidth.get(), "Line width"),
             "link_x": self.link_x.get(), "auto_x": auto_x,
             "xmin": parse_limit(self.xmin.get(), "X min") if not auto_x else None,
@@ -1764,6 +1910,13 @@ class App(ttk.Frame):
         self.refresh_line_rows()
         return drawn
 
+    def _time_axis_label(self):
+        index = self.time_index()
+        if index is None:
+            return SAMPLE_AXIS_LABEL
+        channel = self.known_channels.get(index)
+        return channel.label() if channel and channel.name.get().strip() else ""
+
     def _column_count(self):
         try:
             return max(1, int(self.columns.get()))
@@ -1787,7 +1940,8 @@ class App(ttk.Frame):
 
     def refresh_line_rows(self):
         """One row per plotted line in the Lines tab, under its panel."""
-        layout = [(id(panel), id(look)) for panel, look, _color in self.drawn_lines]
+        runs = [(run.path, self.run_colors[run.path]) for run in self.compared_runs]
+        layout = ([(id(panel), id(look)) for panel, look, _color in self.drawn_lines], runs)
         if layout == self.line_rows_shown:
             for _panel, look, color in self.drawn_lines:
                 self.line_swatches[id(look)].configure(background=color)
@@ -1797,7 +1951,7 @@ class App(ttk.Frame):
             widget.destroy()
         self.line_swatches = {}
         self.line_frame.columnconfigure(1, weight=1)
-        row = 0
+        row = self._show_run_order()
         for panel in self.panels:
             lines = [(look, color) for drawn, look, color in self.drawn_lines if drawn is panel]
             if not lines:
@@ -1822,6 +1976,22 @@ class App(ttk.Frame):
                 style.grid(row=row, column=2, padx=(px(4), 0), pady=px(1))
                 style.bind("<<ComboboxSelected>>", lambda _e: self.draw())
                 row += 1
+
+    def _show_run_order(self):
+        """The compared runs, draggable, above the lines. Returns the next free grid row."""
+        if not self.compared_runs:
+            return 0
+        heading(self.line_frame, "Run order").grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(self.line_frame, text="Higher is drawn in front.", style="Small.TLabel").grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(0, px(2)))
+        order = DragRows(self.line_frame, self._pick_run_color, self.on_run_reorder,
+                         "Drag to reorder. Higher is drawn in front and comes first in the "
+                         "legend.", scrolling=False)
+        order.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, px(10)))
+        short = runs_module.short_labels(self.compared_runs)
+        order.set_items([(run.path, short[run.path], self.run_colors[run.path])
+                         for run in self.compared_runs])
+        return 3
 
     def pick_line_color(self, look):
         current = self.line_swatches[id(look)].cget("background")
@@ -1933,7 +2103,7 @@ class App(ttk.Frame):
             return
         try:
             t, values = self.computed()
-            columns = [(c.name.get(), values[id(c)]) for c in self.channels
+            columns = [(c.display_name(), values[id(c)]) for c in self.channels
                        if c.panel.get() != HIDDEN]
             written = store.export_csv(path, t, columns, self.visible_window())
         except ValueError as exc:
@@ -1987,7 +2157,9 @@ class App(ttk.Frame):
         self.names_path = None
         self.names_label.configure(text="Names from the loaded settings.", foreground=INK_2)
         if state["path"] and state["path"] != self.path:
-            self.arrays = data.load_arrays(state["path"])
+            log = data.load_log(state["path"])
+            self.arrays = log.arrays
+            self.log_names = log.names
             self.path = state["path"]
             self.file_run = runs_module.Run(self.path, os.path.dirname(self.path))
             self._show_file_name(self.path)
@@ -2006,11 +2178,16 @@ class App(ttk.Frame):
         for channel, saved in zip(self.channels, state["channels"]):
             channel.restore(saved)
             self._adopt(channel)
+        self.known_channels = {c.index: c for c in self.raw_channels()}
+        # Everything in a settings file was chosen, so new logs must leave it alone.
+        self.time_chosen = True
+        self.orientation_forced = state["orientation"]
+        self.auto_title = None
         # Settings saved before signals could be reordered have no "signal_order".
         raw_count = len(self.raw_channels())
         saved_order = state.get("signal_order")
         self.signal_order = (saved_order if self._valid_order(saved_order, raw_count)
-                             else self._saved_signal_order(raw_count))
+                             else list(range(raw_count)))
         self.line_looks = {}
         # Settings saved before legends could be edited have no "lines".
         for saved in state.get("lines", []):
@@ -2044,3 +2221,61 @@ class App(ttk.Frame):
         self.draw_panel_rows()
         self.draw_signal_rows()
         self.draw()
+
+    # ---------- reset ----------
+
+    def reset_setup(self):
+        if not messagebox.askyesno(
+                "Reset setup",
+                "Put signal names, colours, panels, line styles, orders and figure settings back "
+                "to what the log's own files say?\n\nThis cannot be undone. The open folder and "
+                "the selected runs stay."):
+            return
+        self._clear_setup()
+        if self.selected_runs() or self.file_run:
+            self.apply_run_selection()
+        elif self.arrays:
+            self.select_variable()
+        else:
+            self.draw_panel_rows()
+            self.draw_signal_rows()
+            self.refresh_line_rows()
+            self.empty_state.grid()
+        self.status.configure(text="Setup reset.", foreground=INK_2)
+
+    def _clear_setup(self):
+        """Forget everything set up for the signals. Which logs are open stays."""
+        self.known_channels = {}
+        self.channels = []
+        self.panels = []
+        self.signal_order = []
+        self.run_rank = []
+        self.run_colors = {}
+        self.line_looks = {}
+        self.drawn_lines = []
+        self.compared_runs = []
+        self.line_rows_shown = None
+        self.single_layout = None
+        self.overlay = None
+        self.overlay_layout = None
+        self.run_matrices = {}
+        self.shown_runs = ()
+        self.names_path = None
+        self.time_chosen = False
+        self.orientation_forced = None
+        self.views.forget()
+        self.auto_title = ""
+        self.title.set("")
+        self.xlabel.set("")
+        self.columns.set(1)
+        self.linewidth.set(DEFAULT_LINE_WIDTH)
+        self.auto_x.set(True)
+        self.xmin.set("")
+        self.xmax.set("")
+        self.link_x.set(True)
+        self.crosshair_on.set(True)
+        self.toggle_crosshair()
+        self._refresh_x_range()
+        self.run_layout.set(OVERLAY)
+        self.figure.clear()
+        self.canvas.draw()
