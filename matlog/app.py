@@ -116,6 +116,11 @@ class App(ttk.Frame):
         # The signals.json the signal names came from, None when typed or defaulted.
         self.names_path = None
         self.channels = []
+        # Channel indices as the signal list shows them. self.channels itself stays in matrix
+        # order, which names files and saved layouts rely on.
+        self.signal_order = []
+        # Set when the order changes while overlaid, for the panels of the single-run view.
+        self._panels_follow_order = False
         self.panels = []
         self.applied_orientation = "rows"
         self.runs = []
@@ -376,7 +381,10 @@ class App(ttk.Frame):
                    takefocus=False).grid(row=0, column=1)
         ttk.Button(head, text="None", style="Ghost.TButton", command=self.check_no_signals,
                    takefocus=False).grid(row=0, column=2)
-        self.signal_list = Checklist(frame, self.on_signal_toggle, self._pick_listed_color)
+        self.signal_list = Checklist(frame, self.on_signal_toggle, self._pick_listed_color,
+                                     self.on_signal_reorder,
+                                     "Drag to reorder. Higher in the list is drawn in front, "
+                                     "and gets a higher panel.")
         self.signal_list.grid(row=1, column=0, sticky="nsew")
 
     # The middle pane: the plot.
@@ -849,6 +857,7 @@ class App(ttk.Frame):
                                  expression=f"channel {i}")
                          for i in range(matrix.shape[0])]
         self.views.forget()
+        self.signal_order = self._saved_signal_order(len(self.channels))
         # Looks belong to the channels just replaced.
         self.line_looks = {}
         for channel in self.channels:
@@ -1111,6 +1120,9 @@ class App(ttk.Frame):
             panel.restore(saved)
         for channel, saved in zip(self.channels, channels):
             channel.restore(saved)
+        if self._panels_follow_order:
+            self._arrange_panels_by_order()
+            self._panels_follow_order = False
         self.draw_panel_rows()
         self.draw_signal_rows()
         self.draw()
@@ -1123,7 +1135,7 @@ class App(ttk.Frame):
         """The signal list, keeping the ticks while runs are overlaid."""
         kept = set(self.signal_list.checked())
         self.signal_list.set_items([(str(c.index), self._listed_name(c), c.color.get())
-                                    for c in self.raw_channels()])
+                                    for c in self.ordered_raw_channels()])
         self.signal_list.set_checked(kept if self.overlay else self._plotted_keys())
 
     def _plotted_keys(self):
@@ -1209,6 +1221,56 @@ class App(ttk.Frame):
         while count > 1 and str(count) not in used:
             count -= 1
         self._resize_panels(count)
+
+    def on_signal_reorder(self, keys):
+        """A signal was dragged: it changes what is in front, and the order of the panels."""
+        self.signal_order = [int(key) for key in keys]
+        self._remember_signal_order()
+        if self.overlay:
+            self._panels_follow_order = True
+            self.plot_overlay(self.overlay[0])
+        else:
+            self._arrange_panels_by_order()
+            self.draw_panel_rows()
+            self.draw()
+        self.draw_signal_rows()
+
+    def _arrange_panels_by_order(self):
+        """Put the panels in the order of the first signal listed on each."""
+        numbers = []
+        for channel in self.ordered_channels():
+            number = channel.panel.get()
+            if number != HIDDEN and number not in numbers:
+                numbers.append(number)
+        by_number = {str(panel.number): panel for panel in self.panels}
+        unused = [panel for number, panel in by_number.items() if number not in numbers]
+        arranged = [by_number[number] for number in numbers] + unused
+        renumbered = {str(panel.number): str(position)
+                      for position, panel in enumerate(arranged, start=1)}
+        for channel in self.channels:
+            if channel.panel.get() != HIDDEN:
+                channel.panel.set(renumbered[channel.panel.get()])
+        for position, panel in enumerate(arranged, start=1):
+            panel.number = position
+        self.panels = arranged
+
+    @staticmethod
+    def _valid_order(order, count):
+        """Whether `order` lists each of `count` channels once. It may come from a file."""
+        return (isinstance(order, list) and all(type(i) is int for i in order)
+                and sorted(order) == list(range(count)))
+
+    def _saved_signal_order(self, count):
+        """The order last used for logs with this many channels, else matrix order."""
+        saved = self.prefs.get("signal_orders")
+        order = saved.get(str(count)) if isinstance(saved, dict) else None
+        return order if self._valid_order(order, count) else list(range(count))
+
+    def _remember_signal_order(self):
+        saved = self.prefs.get("signal_orders")
+        orders = dict(saved) if isinstance(saved, dict) else {}
+        orders[str(len(self.signal_order))] = self.signal_order
+        self._remember(signal_orders=orders)
 
     def _pick_listed_color(self, key):
         self.pick_color(next(c for c in self.channels if str(c.index) == key and not c.derived))
@@ -1311,7 +1373,7 @@ class App(ttk.Frame):
         choices = [HIDDEN] + [str(p.number) for p in self.panels]
         self.expression_entries = {}
         row = 1
-        for channel in self.channels:
+        for channel in self.ordered_channels():
             swatch(self.signal_frame, channel.color.get(),
                    lambda c=channel: self.pick_color(c)).grid(row=row, column=0, padx=(0, px(4)))
             ttk.Entry(self.signal_frame, textvariable=channel.name, width=8).grid(
@@ -1392,7 +1454,8 @@ class App(ttk.Frame):
         """Give every plottable signal its own panel — the default view."""
         time_index = self.time_index()
         # A name left blank in signals.json marks an unused Mux input.
-        plotted = [c for c in self.channels if c.index != time_index and c.name.get().strip()]
+        plotted = [c for c in self.ordered_channels()
+                   if c.index != time_index and c.name.get().strip()]
         self.panel_count.set(max(1, min(len(plotted), MAX_PANELS)))
         self.set_panel_count()
         for channel in self.channels:
@@ -1405,6 +1468,15 @@ class App(ttk.Frame):
 
     def raw_channels(self):
         return [c for c in self.channels if not c.derived]
+
+    def ordered_raw_channels(self):
+        """The logged signals in the order the signal list shows them."""
+        rank = {index: position for position, index in enumerate(self.signal_order)}
+        return sorted(self.raw_channels(), key=lambda c: rank.get(c.index, len(rank) + c.index))
+
+    def ordered_channels(self):
+        """Every signal in list order. Derived ones are not listed, and come last."""
+        return self.ordered_raw_channels() + [c for c in self.channels if c.derived]
 
     def apply_names_for(self, path):
         """Name the logged signals from the signals.json nearest above `path`."""
@@ -1591,13 +1663,13 @@ class App(ttk.Frame):
     def _draw(self):
         t, values = self.computed()
         series = {id(p): [] for p in self.panels}
-        for channel in self.channels:
+        for depth, channel in enumerate(self.ordered_channels()):
             if channel.panel.get() == HIDDEN:
                 continue
             panel = self.panels[int(channel.panel.get()) - 1]
             series[id(panel)].append(self._line(
                 panel, ("", channel.uid), channel.label(), channel.color.get(), "-",
-                t, values[id(channel)]))
+                t, values[id(channel)], depth))
         self.signal_list.set_checked(self._plotted_keys())
         drawn = self._render(series)
         if not drawn:
@@ -1617,6 +1689,9 @@ class App(ttk.Frame):
         single = len(chosen) == 1
         index = self.time_index()
         short = runs_module.short_labels(chosen)
+        # By channel, not list position: dragging a signal must not change its dash pattern.
+        dash_rank = {c.index: rank
+                     for rank, c in enumerate(sorted(signals, key=lambda c: c.index))}
         series = {id(p): [] for p in self.panels}
         for position, run in enumerate(chosen):
             matrix = self.run_matrices[run.path]
@@ -1637,10 +1712,11 @@ class App(ttk.Frame):
                     label = (short[run.path] if layout == OVERLAY
                              else f"{short[run.path]} \u00b7 {channel.name.get()}")
                     color = palette_color(position)
-                    style = line_style(order) if merged else "-"
+                    style = line_style(dash_rank[channel.index]) if merged else "-"
                 key = ("" if single else run.path, channel.uid)
                 series[id(panel)].append(self._line(
-                    panel, key, label, color, style, t, channel.transform(matrix[channel.index])))
+                    panel, key, label, color, style, t, channel.transform(matrix[channel.index]),
+                    order))
         drawn = self._render(series)
         if not drawn:
             return
@@ -1699,7 +1775,7 @@ class App(ttk.Frame):
         return (id(panel), panel.title.get(), self.auto_x.get(), self.xmin.get(), self.xmax.get(),
                 panel.auto_y.get(), panel.ymin.get(), panel.ymax.get())
 
-    def _line(self, panel, key, auto_label, color, auto_style, t, values):
+    def _line(self, panel, key, auto_label, color, auto_style, t, values, depth):
         """One Series, with whatever legend text, style and colour the user gave this line."""
         look = self.line_looks.get(key)
         if look is None:
@@ -1707,7 +1783,7 @@ class App(ttk.Frame):
             self._watch(look.variables())
         legend, style, color = look.resolve(auto_label, auto_style, color)
         self.drawn_lines.append((panel, look, color))
-        return figure_builder.Series(auto_label, legend, color, style, t, values)
+        return figure_builder.Series(auto_label, legend, color, style, t, values, depth)
 
     def refresh_line_rows(self):
         """One row per plotted line in the Lines tab, under its panel."""
@@ -1874,7 +1950,7 @@ class App(ttk.Frame):
                     link_x=self.link_x.get(), crosshair=self.crosshair_on.get(),
                     channels=[c.state() for c in self.channels],
                     panels=[p.state() for p in self.panels],
-                    lines=self._line_states(),
+                    lines=self._line_states(), signal_order=self.signal_order,
                     export=dict(preset=self.export_preset.get(), width=self.export_width.get(),
                                 height=self.export_height.get(), dpi=self.export_dpi.get()))
 
@@ -1930,6 +2006,11 @@ class App(ttk.Frame):
         for channel, saved in zip(self.channels, state["channels"]):
             channel.restore(saved)
             self._adopt(channel)
+        # Settings saved before signals could be reordered have no "signal_order".
+        raw_count = len(self.raw_channels())
+        saved_order = state.get("signal_order")
+        self.signal_order = (saved_order if self._valid_order(saved_order, raw_count)
+                             else self._saved_signal_order(raw_count))
         self.line_looks = {}
         # Settings saved before legends could be edited have no "lines".
         for saved in state.get("lines", []):

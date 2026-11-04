@@ -2,12 +2,13 @@
 import tkinter as tk
 from tkinter import TclError, ttk
 
-from .theme import BORDER, INK, INK_3, SURFACE, px
+from .theme import ACCENT, BORDER, INK, INK_3, SURFACE, px
 
 TOOLTIP_DELAY_MS = 500
 TOOLTIP_WRAP = 600
 SCROLL_UNIT = 24
 SWATCH_PX = 14
+DRAG_HANDLE = "\u2261"
 
 
 def autohiding(bar, sticky_set):
@@ -189,6 +190,8 @@ class Tooltip:
         widget.bind("<Motion>", self._moved, add="+")
         widget.bind("<Leave>", lambda _e: self._hide(), add="+")
         widget.bind("<ButtonPress>", lambda _e: self._hide(), add="+")
+        # A tip still waiting to appear must not outlive a row that gets rebuilt.
+        widget.bind("<Destroy>", lambda _e: self._hide(), add="+")
 
     def _moved(self, event):
         text = self.text(event) if callable(self.text) else self.text
@@ -220,43 +223,96 @@ class Tooltip:
 
 
 class Checklist(ttk.Frame):
-    """Rows of a tick box, a colour patch and a label, keyed by a string.
+    """Rows of a drag handle, a tick box, a colour patch and a label, keyed by a string.
 
-    A click calls on_toggle(); setting the ticks from code does not, so the list can
-    follow the plot without feeding back into it.
+    A click calls on_toggle() and a finished drag calls on_reorder(keys). Setting the ticks
+    from code calls neither, so the list can follow the plot without feeding back into it.
     """
 
-    def __init__(self, parent, on_toggle, on_color):
+    def __init__(self, parent, on_toggle, on_color, on_reorder, handle_tip):
         super().__init__(parent)
         self.on_toggle = on_toggle
         self.on_color = on_color
+        self.on_reorder = on_reorder
+        self.handle_tip = handle_tip
         self.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
         holder, self.inner = scrollable(self)
         holder.grid(row=0, column=0, sticky="nsew")
-        self.inner.columnconfigure(0, weight=1)
+        self.inner.columnconfigure(1, weight=1)
         self.rows = {}
+        # The keys in the order shown.
+        self.order = []
+        self.dragged = None
+        self.order_before_drag = []
 
     def set_items(self, items):
         """Rebuild for `items`, a list of (key, text, colour). Starts with nothing ticked."""
         for widget in self.inner.winfo_children():
             widget.destroy()
         self.rows = {}
-        for row, (key, text, color) in enumerate(items):
+        self.order = [key for key, _text, _color in items]
+        self.dragged = None
+        for key, text, color in items:
+            handle = tk.Label(self.inner, text=DRAG_HANDLE, foreground=INK_3, background=SURFACE,
+                              cursor="sb_v_double_arrow")
+            handle.bind("<ButtonPress-1>", lambda _e, k=key: self._start_drag(k))
+            handle.bind("<B1-Motion>", self._drag)
+            handle.bind("<ButtonRelease-1>", lambda _e: self._finish_drag())
+            Tooltip(handle, self.handle_tip)
             ticked = tk.BooleanVar(self, value=False)
             box = ttk.Checkbutton(self.inner, text=text, variable=ticked, command=self.on_toggle,
                                   style="Row.TCheckbutton", takefocus=False)
-            box.grid(row=row, column=0, sticky="ew")
             patch = swatch(self.inner, color, lambda k=key: self.on_color(k))
-            patch.grid(row=row, column=1, padx=(px(4), 0))
-            self.rows[key] = (ticked, box, patch)
+            self.rows[key] = (ticked, box, patch, handle)
+        self._place_rows()
+
+    def _place_rows(self):
+        for row, key in enumerate(self.order):
+            _ticked, box, patch, handle = self.rows[key]
+            handle.grid(row=row, column=0, padx=(0, px(4)))
+            box.grid(row=row, column=1, sticky="ew")
+            patch.grid(row=row, column=2, padx=(px(4), 0))
+
+    def _start_drag(self, key):
+        self.dragged = key
+        self.order_before_drag = list(self.order)
+        self.rows[key][3].configure(foreground=ACCENT)
+
+    def _drag(self, event):
+        if self.dragged is None:
+            return
+        self._scroll_at_edges(event.y_root)
+        _column, target = self.inner.grid_location(0, event.y_root - self.inner.winfo_rooty())
+        target = min(max(target, 0), len(self.order) - 1)
+        position = self.order.index(self.dragged)
+        if target != position:
+            self.order.insert(target, self.order.pop(position))
+            self._place_rows()
+
+    def _scroll_at_edges(self, pointer_y):
+        """Dragging past the top or bottom of the view brings the hidden rows in."""
+        viewport = self.inner.master
+        top = viewport.winfo_rooty()
+        if pointer_y < top:
+            viewport.yview_scroll(-1, "units")
+        elif pointer_y > top + viewport.winfo_height():
+            viewport.yview_scroll(1, "units")
+
+    def _finish_drag(self):
+        if self.dragged is None:
+            return
+        self.rows[self.dragged][3].configure(foreground=INK_3)
+        self.dragged = None
+        if self.order != self.order_before_drag:
+            self.on_reorder(list(self.order))
 
     def checked(self):
-        return [key for key, (ticked, _box, _patch) in self.rows.items() if ticked.get()]
+        return [key for key in self.order if self.rows[key][0].get()]
 
     def set_checked(self, keys):
-        for key, (ticked, _box, _patch) in self.rows.items():
-            ticked.set(key in keys)
+        for key, row in self.rows.items():
+            row[0].set(key in keys)
 
     def rename(self, key, text):
         if key in self.rows:

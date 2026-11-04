@@ -7,8 +7,9 @@ import matplotlib.colors as mcolors
 
 # One plotted line. Each carries its own time vector: overlaid runs are separate
 # logs and rarely share a sample count. `label` names the line on hover; `legend` is
-# what the legend shows, empty to leave the line out of it.
-Series = namedtuple("Series", "label legend color style t values")
+# what the legend shows, empty to leave the line out of it. `depth` is the signal's place in
+# the signal list: 0 is drawn in front of everything.
+Series = namedtuple("Series", "label legend color style t values depth")
 
 SURFACE, INK, INK_2 = "#ffffff", "#0b0b0b", "#52514e"
 
@@ -18,6 +19,8 @@ LEGEND_FONT_PT = 8
 LEGEND_ROW_FONTS = 1.7
 # loc="best" tests every sample against the legend box, which stalls on long logs.
 BEST_LEGEND_MAX_SAMPLES = 50000
+# Lines stack between these, above the grid and the zero line, below the legend.
+LINE_ZORDER_BACK, LINE_ZORDER_FRONT = 2.0, 2.5
 TITLE_FONT_PT = 12
 TITLE_MIN_FONT_PT = 7
 # The share of the figure's width a title may take, leaving its left margin clear.
@@ -69,7 +72,8 @@ def draw(figure, placements, rows, columns, series, settings):
         axes[id(panel)] = ax
         for line in series[id(panel)]:
             ax.plot(line.t, line.values, color=line.color, linestyle=line.style,
-                    linewidth=settings["linewidth"], label=line.legend or "_nolegend_")
+                    linewidth=settings["linewidth"], label=line.legend or "_nolegend_",
+                    zorder=_line_zorder(line.depth))
         _style(ax, panel, settings)
         _label_x(ax, panel, settings, id(panel) in bottom)
     if settings["title"]:
@@ -80,6 +84,11 @@ def draw(figure, placements, rows, columns, series, settings):
         if panel.legend.get() and any(line.legend for line in series[id(panel)]):
             _legend(axes[id(panel)], series[id(panel)])
     return axes
+
+
+def _line_zorder(depth):
+    """Further down the list, further back. Lines of equal depth keep their drawing order."""
+    return LINE_ZORDER_BACK + (LINE_ZORDER_FRONT - LINE_ZORDER_BACK) / (depth + 1)
 
 
 def relayout(figure):

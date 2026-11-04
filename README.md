@@ -92,6 +92,12 @@ picked up when there is no last folder to reopen.
 runs. A newly ticked signal gets its own panel. To put several signals in one panel, choose
 the same panel for them in the Signals tab. Click a colour patch to change the colour.
 
+**Drag a signal by its handle (≡) to reorder it.** Higher in the list is drawn in front, so
+dragging a noisy signal down stops it covering the others. The order also sets the panel
+order and the legend order. It is remembered for logs with the same number of signals, and
+**Save…** under Figure → Settings file stores it too. Derived signals are not in the list:
+they are always drawn behind the signals listed there.
+
 ### Layout
 
 The buttons in the top bar lay out the ticked signals, for one run or several:
