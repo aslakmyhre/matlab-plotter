@@ -32,7 +32,7 @@ cd matlab-plotter
 powershell -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 
-Both scripts create `.venv/` in the repo, upgrade pip, and install `requirements.txt`. They abort with instructions if Python or tkinter is missing.
+Both scripts create `.venv/` in the repo, upgrade pip, and install `requirements.txt`. They abort with instructions if Python or tkinter is missing. `setup.sh` also checks for venv support (`python3-venv` on Debian/Ubuntu) and that EPS export works.
 
 ### Manual, if you prefer
 

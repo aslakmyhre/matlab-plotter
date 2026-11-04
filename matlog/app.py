@@ -33,6 +33,14 @@ LAYOUT_CHOICES = ((OVERLAY, "Overlay: a panel per signal, a line per run"),
                   (SIDE_BY_SIDE, "Side by side: a panel per run, its selected signals "
                                  "together"))
 FOLDER_PREFIX = "dir:"
+FIGURE_FORMATS = (("PNG image", "*.png"), ("PDF", "*.pdf"), ("SVG", "*.svg"), ("EPS", "*.eps"))
+
+
+def with_format_extension(path, format_name):
+    """Give a bare filename the extension of the format chosen in the save dialog."""
+    if os.path.splitext(path)[1]:
+        return path
+    return path + dict(FIGURE_FORMATS)[format_name].lstrip("*")
 
 
 def merged_title(signals):
@@ -1131,11 +1139,16 @@ class App(ttk.Frame):
         if not self.figure.axes:
             messagebox.showinfo("Nothing to save", "Plot something first.")
             return
-        path = filedialog.asksaveasfilename(
-            defaultextension=".png",
-            filetypes=[("PNG image", "*.png"), ("PDF", "*.pdf"), ("SVG", "*.svg"),
-                       ("EPS", "*.eps")])
-        if not path:
+        # No defaultextension: Tk's Linux dialog would add it whatever format is chosen,
+        # saving a PNG when EPS was asked for.
+        chosen = tk.StringVar(value=FIGURE_FORMATS[0][0])
+        typed = filedialog.asksaveasfilename(filetypes=FIGURE_FORMATS, typevariable=chosen)
+        if not typed:
+            return
+        path = with_format_extension(typed, chosen.get())
+        # The dialog only asked about overwriting the name it returned, not this one.
+        if path != typed and os.path.exists(path) and not messagebox.askyesno(
+                "Overwrite?", f"{os.path.basename(path)} already exists. Replace it?"):
             return
         undo = (figure_builder.flatten_alpha(self.figure, SURFACE)
                 if path.lower().endswith(".eps") else None)
