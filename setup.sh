@@ -19,9 +19,26 @@ if ! "$PY" -c "import tkinter" >/dev/null 2>&1; then
     exit 1
 fi
 
+# Debian and Ubuntu split ensurepip out of python3, and venv cannot create a pip without it.
+if ! "$PY" -c "import ensurepip" >/dev/null 2>&1; then
+    echo "venv support missing from this Python. Install it, then re-run:" >&2
+    echo "  Debian/Ubuntu: sudo apt install python3-venv" >&2
+    exit 1
+fi
+
 "$PY" -m venv .venv
 ./.venv/bin/python -m pip install --upgrade pip
 ./.venv/bin/python -m pip install -r requirements.txt
+
+# Fails the setup here rather than later in the GUI if the install cannot write EPS.
+./.venv/bin/python -c "
+import io
+from matplotlib.figure import Figure
+figure = Figure()
+figure.add_subplot().plot([0, 1])
+figure.savefig(io.BytesIO(), format='eps', bbox_inches='tight')
+"
+echo "EPS export check passed."
 
 echo
 echo "Done. Run with:"
