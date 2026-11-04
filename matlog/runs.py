@@ -1,5 +1,6 @@
 """A folder of runs: every .mat log below it, subfolders included."""
 import os
+import posixpath
 import re
 
 RUN_EXTENSION = ".mat"
@@ -18,6 +19,47 @@ class Run:
 
     def matches(self, text):
         return text.lower() in self.label.lower()
+
+
+def _is_number(token):
+    try:
+        float(token)
+    except ValueError:
+        return False
+    return True
+
+
+def _differing_parts(names):
+    """Each name cut down to the "_" separated parts that differ, plus what labels them.
+
+    Log names repeat most of their parameters, so run_136_q1_3.60_q2_2.50_... against
+    run_137_q1_3.60_q2_0.25_... comes out as "run 136 q2 2.50" and "run 137 q2 0.25".
+    """
+    split = [name.split("_") for name in names]
+    if len({len(parts) for parts in split}) != 1:
+        return names
+    keep = set()
+    for position, column in enumerate(zip(*split)):
+        if len(set(column)) > 1:
+            keep.add(position)
+            if position and not _is_number(split[0][position - 1]):
+                keep.add(position - 1)
+    if not keep:
+        return names
+    return [" ".join(parts[i] for i in sorted(keep)) for parts in split]
+
+
+def short_labels(chosen):
+    """{run path: just enough of its name to tell these runs apart}."""
+    if len(chosen) == 1:
+        return {chosen[0].path: chosen[0].label}
+    names = _differing_parts([run.name for run in chosen])
+    shared = posixpath.commonpath([run.folder for run in chosen])
+    labels = {}
+    for run, name in zip(chosen, names):
+        below = run.folder[len(shared):].lstrip("/")
+        labels[run.path] = f"{below}/{name}" if below else name
+    return labels
 
 
 def sort_key(name):

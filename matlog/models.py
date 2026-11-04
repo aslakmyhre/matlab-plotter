@@ -18,9 +18,15 @@ XLABEL_MODES = ["auto", "always", "never"]
 
 def parse_float(text, field):
     try:
-        return float(text)
+        # A decimal comma is what a Norwegian keyboard types.
+        return float(text.replace(",", "."))
     except ValueError:
         raise ValueError(f"{field}: {text!r} is not a number")
+
+
+def parse_limit(text, field):
+    """An axis limit. Left blank, that end of the axis stays automatic."""
+    return parse_float(text, field) if text.strip() else None
 
 
 def palette_color(position):
@@ -41,6 +47,9 @@ class Channel:
         self.name = tk.StringVar(value=name)
         self.unit = tk.StringVar(value=unit)
         self.expression = tk.StringVar(value=expression)
+        # What a file last called this signal. A name that differs was typed, and stays.
+        self.file_name = name
+        self.file_unit = unit
         self.scale = tk.StringVar(value="1")
         self.offset = tk.StringVar(value="0")
         self.color = tk.StringVar(value=color)
@@ -52,13 +61,34 @@ class Channel:
     def derived(self):
         return self.index is None
 
+    def display_name(self):
+        """The name, or what to call a signal nothing has named. The name itself stays empty."""
+        name = self.name.get().strip()
+        if name:
+            return name
+        return "Derived" if self.derived else f"Channel {self.index}"
+
     def label(self):
         unit = self.unit.get().strip()
-        return f"{self.name.get()}  [{unit}]" if unit else self.name.get()
+        return f"{self.display_name()}  [{unit}]" if unit else self.display_name()
+
+    def take_file_name(self, name, unit):
+        """Follow what a file calls this signal, unless the user has typed over it."""
+        if self.name.get() == self.file_name and self.name.get() != name:
+            self.name.set(name)
+        if self.unit.get() == self.file_unit and self.unit.get() != unit:
+            self.unit.set(unit)
+        self.file_name, self.file_unit = name, unit
+
+    def force_name(self, name, unit):
+        """A name chosen on purpose, such as a names file loaded by hand."""
+        self.file_name, self.file_unit = name, unit
+        self.name.set(name)
+        self.unit.set(unit)
 
     def transform(self, raw):
-        scale = parse_float(self.scale.get(), f"{self.name.get()} scale")
-        offset = parse_float(self.offset.get(), f"{self.name.get()} offset")
+        scale = parse_float(self.scale.get(), f"{self.display_name()} scale")
+        offset = parse_float(self.offset.get(), f"{self.display_name()} offset")
         return raw * scale + offset
 
     def variables(self):
@@ -129,10 +159,10 @@ class Panel:
         self.xlabels = tk.StringVar(value="auto")
 
     def ymin_value(self):
-        return parse_float(self.ymin.get(), f"Panel {self.number} y min")
+        return parse_limit(self.ymin.get(), f"Panel {self.number} y min")
 
     def ymax_value(self):
-        return parse_float(self.ymax.get(), f"Panel {self.number} y max")
+        return parse_limit(self.ymax.get(), f"Panel {self.number} y max")
 
     def variables(self):
         return (self.title, self.ylabel, self.auto_y, self.ymin, self.ymax,

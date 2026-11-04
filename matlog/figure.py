@@ -1,14 +1,30 @@
 """Turning the panel configuration into matplotlib axes."""
+import math
 from collections import namedtuple
+from contextlib import contextmanager
 
 import matplotlib.colors as mcolors
 
 # One plotted line. Each carries its own time vector: overlaid runs are separate
 # logs and rarely share a sample count. `label` names the line on hover; `legend` is
-# what the legend shows, empty to leave the line out of it.
-Series = namedtuple("Series", "label legend color style t values")
+# what the legend shows, empty to leave the line out of it. `depth` is the signal's place in
+# the signal list: 0 is drawn in front of everything.
+Series = namedtuple("Series", "label legend color style t values depth")
 
-SURFACE, INK, INK_2 = "#fcfcfb", "#0b0b0b", "#52514e"
+SURFACE, INK, INK_2 = "#ffffff", "#0b0b0b", "#52514e"
+
+CM_PER_INCH = 2.54
+LEGEND_FONT_PT = 8
+# Height of one legend row, as a multiple of its font size.
+LEGEND_ROW_FONTS = 1.7
+# loc="best" tests every sample against the legend box, which stalls on long logs.
+BEST_LEGEND_MAX_SAMPLES = 50000
+# Lines stack between these, above the grid and the zero line, below the legend.
+LINE_ZORDER_BACK, LINE_ZORDER_FRONT = 2.0, 2.5
+TITLE_FONT_PT = 12
+TITLE_MIN_FONT_PT = 7
+# The share of the figure's width a title may take, leaving its left margin clear.
+TITLE_MAX_WIDTH = 0.96
 
 _COLOUR_ACCESSORS = (("get_color", "set_color"),
                      ("get_edgecolor", "set_edgecolor"),
@@ -56,15 +72,69 @@ def draw(figure, placements, rows, columns, series, settings):
         axes[id(panel)] = ax
         for line in series[id(panel)]:
             ax.plot(line.t, line.values, color=line.color, linestyle=line.style,
-                    linewidth=settings["linewidth"], label=line.legend or "_nolegend_")
+                    linewidth=settings["linewidth"], label=line.legend or "_nolegend_",
+                    zorder=_line_zorder(line.depth))
         _style(ax, panel, settings)
         _label_x(ax, panel, settings, id(panel) in bottom)
-        if panel.legend.get() and any(line.legend for line in series[id(panel)]):
-            ax.legend(loc="best", fontsize=8, frameon=False)
     if settings["title"]:
-        figure.suptitle(settings["title"], x=0.02, ha="left", fontsize=12, color=INK)
-    figure.subplots_adjust(hspace=0.4, wspace=0.24)
+        figure.suptitle(settings["title"], x=0.02, ha="left", fontsize=TITLE_FONT_PT, color=INK)
+    relayout(figure)
+    # After the layout, because a legend's columns depend on the height its panel ended up with.
+    for panel, _row, _col, _span in placements:
+        if panel.legend.get() and any(line.legend for line in series[id(panel)]):
+            _legend(axes[id(panel)], series[id(panel)])
     return axes
+
+
+def _line_zorder(depth):
+    """Further down the list, further back. Lines of equal depth keep their drawing order."""
+    return LINE_ZORDER_BACK + (LINE_ZORDER_FRONT - LINE_ZORDER_BACK) / (depth + 1)
+
+
+def relayout(figure):
+    """Fit everything to the figure's present size."""
+    _fit_title(figure)
+    figure.tight_layout()
+
+
+def _fit_title(figure):
+    """Log names can be wider than the figure, so a long title gets smaller, not clipped."""
+    title = figure._suptitle
+    if title is None:
+        return
+    title.set_fontsize(TITLE_FONT_PT)
+    width = title.get_window_extent(figure.canvas.get_renderer()).width
+    room = figure.bbox.width * TITLE_MAX_WIDTH
+    if width > room:
+        title.set_fontsize(max(TITLE_MIN_FONT_PT, TITLE_FONT_PT * room / width))
+
+
+def _legend(ax, lines):
+    """A legend that stays inside its panel: more entries than fit go into more columns."""
+    entries = sum(1 for line in lines if line.legend)
+    samples = sum(len(line.t) for line in lines)
+    row_pixels = LEGEND_FONT_PT * LEGEND_ROW_FONTS * ax.figure.dpi / 72
+    rows_that_fit = max(1, int(ax.get_window_extent().height / row_pixels))
+    ax.legend(loc="best" if samples <= BEST_LEGEND_MAX_SAMPLES else "upper right",
+              fontsize=LEGEND_FONT_PT, ncols=math.ceil(entries / rows_that_fit),
+              frameon=True, framealpha=0.85, facecolor=SURFACE, edgecolor="none",
+              borderpad=0.3, handlelength=1.6, columnspacing=1.0)
+
+
+@contextmanager
+def sized_for_export(figure, size_cm):
+    """Lay the figure out at this physical size while saving. None keeps the window's size."""
+    if size_cm is None:
+        yield
+        return
+    original = figure.get_size_inches().copy()
+    figure.set_size_inches(size_cm[0] / CM_PER_INCH, size_cm[1] / CM_PER_INCH, forward=False)
+    relayout(figure)
+    try:
+        yield
+    finally:
+        figure.set_size_inches(original, forward=False)
+        relayout(figure)
 
 
 def _style(ax, panel, settings):
