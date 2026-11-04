@@ -15,6 +15,8 @@ a = Analysis(
         'scipy.io.matlab._mio5_utils',
         'scipy.io.matlab._streams',
         'scipy.io.matlab._mio_utils',
+        # Pillow's Tk bridge loads this from C, so the import graph does not see it either.
+        'PIL._tkinter_finder',
     ],
     hookspath=[],
     runtime_hooks=[],

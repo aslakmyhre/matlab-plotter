@@ -18,9 +18,15 @@ XLABEL_MODES = ["auto", "always", "never"]
 
 def parse_float(text, field):
     try:
-        return float(text)
+        # A decimal comma is what a Norwegian keyboard types.
+        return float(text.replace(",", "."))
     except ValueError:
         raise ValueError(f"{field}: {text!r} is not a number")
+
+
+def parse_limit(text, field):
+    """An axis limit. Left blank, that end of the axis stays automatic."""
+    return parse_float(text, field) if text.strip() else None
 
 
 def palette_color(position):
@@ -129,10 +135,10 @@ class Panel:
         self.xlabels = tk.StringVar(value="auto")
 
     def ymin_value(self):
-        return parse_float(self.ymin.get(), f"Panel {self.number} y min")
+        return parse_limit(self.ymin.get(), f"Panel {self.number} y min")
 
     def ymax_value(self):
-        return parse_float(self.ymax.get(), f"Panel {self.number} y max")
+        return parse_limit(self.ymax.get(), f"Panel {self.number} y max")
 
     def variables(self):
         return (self.title, self.ylabel, self.auto_y, self.ymin, self.ymax,
