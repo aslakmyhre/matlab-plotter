@@ -1,9 +1,0 @@
-src = fullfile(fileparts(which(bdroot)), "tempDataFile.mat");
-dst = fullfile(fileparts(src), sprintf("Data/run_p1_%0.2f_p2%0.2f.mat", p1, p2));
-
-if isfile(src)
-    [ok, msg] = mov(src, dst, "f");
-    if ~ok, warning(msg); end
-else
-    warning("tempDataFile.mat not found");
-end
