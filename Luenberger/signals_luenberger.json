@@ -1,0 +1,68 @@
+{
+  "signals": [
+    {
+      "name": "time",
+      "unit": ""
+    },
+    {
+      "name": "pitch ref",
+      "unit": ""
+    },
+    {
+      "name": "pitch (Encoder)",
+      "unit": ""
+    },
+    {
+      "name": "pitch rate (Encoder)",
+      "unit": ""
+    },
+    {
+      "name": "elevation rate (Encoder)",
+      "unit": ""
+    },
+    {
+      "name": "elevation (Encoder)",
+      "unit": ""
+    },
+    {
+      "name": "elevation rate ref",
+      "unit": ""
+    },
+    {
+      "name": "pitch (Luenberger)",
+      "unit": ""
+    },
+    {
+      "name": "pitch rate (Luenberger)",
+      "unit": ""
+    },
+    {
+      "name": "elevation rate (Luenberger)",
+      "unit": ""
+    },
+    {
+      "name": "elevation (Luenberger)",
+      "unit": ""
+    },
+    {
+      "name": "pitch (IMU)",
+      "unit": ""
+    },
+    {
+      "name": "pitch rate (IMU)",
+      "unit": ""
+    },
+    {
+      "name": "elevation rate (IMU)",
+      "unit": ""
+    },
+    {
+      "name": "elevation (IMU)",
+      "unit": ""
+    },
+    {
+      "name": "none",
+      "unit": ""
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 """Turning the panel configuration into matplotlib axes."""
 import math
+import re
 from collections import namedtuple
 from contextlib import contextmanager
 
@@ -25,6 +26,10 @@ TITLE_FONT_PT = 12
 TITLE_MIN_FONT_PT = 7
 # The share of the figure's width a title may take, leaving its left margin clear.
 TITLE_MAX_WIDTH = 0.96
+# Where a panel title may wrap: after the "·" between merged signal names if it has
+# them, so no name is split, otherwise at any space.
+SIGNAL_BREAK = re.compile("(?<= ·) ")
+WORD_BREAK = re.compile(" ")
 
 _COLOUR_ACCESSORS = (("get_color", "set_color"),
                      ("get_edgecolor", "set_edgecolor"),
@@ -92,9 +97,43 @@ def _line_zorder(depth):
 
 
 def relayout(figure):
-    """Fit everything to the figure's present size."""
+    """Fit everything to the figure's present size.
+
+    A panel title wider than its panel, like a merged panel naming every signal, would
+    make tight_layout squeeze the panel sideways to fit it. So the panels are laid out
+    without their titles first, then each title wraps to its panel's width and the
+    second pass only makes room for its height.
+    """
     _fit_title(figure)
+    titles = [ax._left_title for ax in figure.axes if ax._left_title.get_text()]
+    for title in titles:
+        title.set_text(title.get_text().replace("\n", " "))
+        title.set_visible(False)
     figure.tight_layout()
+    renderer = figure.canvas.get_renderer()
+    for title in titles:
+        # Hidden text measures as empty.
+        title.set_visible(True)
+        _wrap_to_panel(title, renderer)
+    figure.tight_layout()
+
+
+def _wrap_to_panel(title, renderer):
+    """Break the title at spaces so each line fits its panel's width.
+
+    Only spaces become line breaks, so joining the lines with spaces gives the title back.
+    """
+    room = title.axes.get_window_extent(renderer).width
+    text = title.get_text()
+    words = (SIGNAL_BREAK if SIGNAL_BREAK.search(text) else WORD_BREAK).split(text)
+    lines = [words[0]]
+    for word in words[1:]:
+        title.set_text(f"{lines[-1]} {word}")
+        if title.get_window_extent(renderer).width > room:
+            lines.append(word)
+        else:
+            lines[-1] = f"{lines[-1]} {word}"
+    title.set_text("\n".join(lines))
 
 
 def _fit_title(figure):
