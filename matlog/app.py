@@ -1809,9 +1809,10 @@ class App(ttk.Frame):
             if channel.panel.get() == HIDDEN:
                 continue
             panel = self.panels[int(channel.panel.get()) - 1]
-            series[id(panel)].append(self._line(
-                panel, ("", channel.uid), channel.label(), channel.color.get(), "-",
-                t, values[id(channel)], depth))
+            line = self._line(panel, ("", channel.uid), channel.label(), channel.color.get(),
+                              "-", t, values[id(channel)], depth)
+            if line is not None:
+                series[id(panel)].append(line)
         self.signal_list.set_checked(self._plotted_keys())
         drawn = self._render(series)
         if not drawn:
@@ -1859,9 +1860,11 @@ class App(ttk.Frame):
                     color = self.run_colors[run.path]
                     style = line_style(dash_rank[channel.index]) if merged else "-"
                 key = ("" if single else run.path, channel.uid)
-                series[id(panel)].append(self._line(
-                    panel, key, label, color, style, t, channel.transform(matrix[channel.index]),
-                    order + position / len(chosen)))
+                line = self._line(panel, key, label, color, style, t,
+                                  channel.transform(matrix[channel.index]),
+                                  order + position / len(chosen))
+                if line is not None:
+                    series[id(panel)].append(line)
         drawn = self._render(series)
         if not drawn:
             return
@@ -1929,13 +1932,18 @@ class App(ttk.Frame):
                 panel.auto_y.get(), panel.ymin.get(), panel.ymax.get())
 
     def _line(self, panel, key, auto_label, color, auto_style, t, values, depth):
-        """One Series, with whatever legend text, style and colour the user gave this line."""
+        """One Series, with whatever legend text, style and colour the user gave this line.
+
+        None for a line unticked in the Lines tab. It still gets its row there, to tick it back.
+        """
         look = self.line_looks.get(key)
         if look is None:
             look = self.line_looks[key] = LineLook(auto_label)
             self._watch(look.variables())
         legend, style, color = look.resolve(auto_label, auto_style, color)
         self.drawn_lines.append((panel, look, color))
+        if not look.shown.get():
+            return None
         return figure_builder.Series(auto_label, legend, color, style, t, values, depth)
 
     def refresh_line_rows(self):
@@ -1950,14 +1958,16 @@ class App(ttk.Frame):
         for widget in self.line_frame.winfo_children():
             widget.destroy()
         self.line_swatches = {}
-        self.line_frame.columnconfigure(1, weight=1)
+        self.line_frame.columnconfigure(2, weight=1)
+        # One run's lines are ticked on and off in the signal list already.
+        tickable = bool(self.compared_runs)
         row = self._show_run_order()
         for panel in self.panels:
             lines = [(look, color) for drawn, look, color in self.drawn_lines if drawn is panel]
             if not lines:
                 continue
             head = ttk.Frame(self.line_frame)
-            head.grid(row=row, column=0, columnspan=3, sticky="ew",
+            head.grid(row=row, column=0, columnspan=4, sticky="ew",
                       pady=(px(12) if row else 0, px(2)))
             heading(head, f"Panel {panel.number}").pack(side="left")
             ttk.Label(head, textvariable=panel.title, style="Muted.TLabel").pack(
@@ -1966,14 +1976,19 @@ class App(ttk.Frame):
                             command=self.draw).pack(side="right")
             row += 1
             for look, color in lines:
+                if tickable:
+                    shown = ttk.Checkbutton(self.line_frame, variable=look.shown,
+                                            command=self.draw, takefocus=False)
+                    shown.grid(row=row, column=0, padx=(0, px(2)), pady=px(1))
+                    Tooltip(shown, "Untick to leave this line out of the plot")
                 patch = swatch(self.line_frame, color, lambda k=look: self.pick_line_color(k))
-                patch.grid(row=row, column=0, padx=(0, px(4)), pady=px(1))
+                patch.grid(row=row, column=1, padx=(0, px(4)), pady=px(1))
                 self.line_swatches[id(look)] = patch
                 ttk.Entry(self.line_frame, textvariable=look.label, width=10).grid(
-                    row=row, column=1, sticky="ew", pady=px(1))
+                    row=row, column=2, sticky="ew", pady=px(1))
                 style = ttk.Combobox(self.line_frame, textvariable=look.style,
                                      values=list(LINE_STYLES), width=8, state="readonly")
-                style.grid(row=row, column=2, padx=(px(4), 0), pady=px(1))
+                style.grid(row=row, column=3, padx=(px(4), 0), pady=px(1))
                 style.bind("<<ComboboxSelected>>", lambda _e: self.draw())
                 row += 1
 
@@ -1981,13 +1996,13 @@ class App(ttk.Frame):
         """The compared runs, draggable, above the lines. Returns the next free grid row."""
         if not self.compared_runs:
             return 0
-        heading(self.line_frame, "Run order").grid(row=0, column=0, columnspan=3, sticky="w")
+        heading(self.line_frame, "Run order").grid(row=0, column=0, columnspan=4, sticky="w")
         ttk.Label(self.line_frame, text="Higher is drawn in front.", style="Small.TLabel").grid(
-            row=1, column=0, columnspan=3, sticky="w", pady=(0, px(2)))
+            row=1, column=0, columnspan=4, sticky="w", pady=(0, px(2)))
         order = DragRows(self.line_frame, self._pick_run_color, self.on_run_reorder,
                          "Drag to reorder. Higher is drawn in front and comes first in the "
                          "legend.", scrolling=False)
-        order.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, px(10)))
+        order.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(0, px(10)))
         short = runs_module.short_labels(self.compared_runs)
         order.set_items([(run.path, short[run.path], self.run_colors[run.path])
                          for run in self.compared_runs])

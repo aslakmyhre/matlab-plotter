@@ -108,7 +108,7 @@ class Channel:
 
 
 class LineLook:
-    """The legend text, style and colour the user gave one plotted line.
+    """The legend text, style, colour and visibility the user gave one plotted line.
 
     The text starts as the automatic label and keeps following it until edited, so
     renaming a signal still reaches legends nobody has touched.
@@ -120,9 +120,10 @@ class LineLook:
         self.style = tk.StringVar(value=style)
         # Empty leaves the colour to the view.
         self.color = tk.StringVar(value=color)
+        self.shown = tk.BooleanVar(value=True)
 
     def variables(self):
-        return (self.label, self.style, self.color)
+        return (self.label, self.style, self.color, self.shown)
 
     def edited(self):
         return (self.label.get() != self.auto_label or self.style.get() != "auto"
@@ -141,6 +142,7 @@ class LineLook:
         self.label.set(self.auto_label or "")
         self.style.set("auto")
         self.color.set("")
+        self.shown.set(True)
 
 
 class Panel:
