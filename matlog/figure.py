@@ -154,8 +154,9 @@ def _legend(ax, lines):
     samples = sum(len(line.t) for line in lines)
     row_pixels = LEGEND_FONT_PT * LEGEND_ROW_FONTS * ax.figure.dpi / 72
     rows_that_fit = max(1, int(ax.get_window_extent().height / row_pixels))
+    # `ncol`, not `ncols`: the newer spelling only exists from matplotlib 3.6.
     ax.legend(loc="best" if samples <= BEST_LEGEND_MAX_SAMPLES else "upper right",
-              fontsize=LEGEND_FONT_PT, ncols=math.ceil(entries / rows_that_fit),
+              fontsize=LEGEND_FONT_PT, ncol=math.ceil(entries / rows_that_fit),
               frameon=True, framealpha=0.85, facecolor=SURFACE, edgecolor="none",
               borderpad=0.3, handlelength=1.6, columnspacing=1.0)
 
