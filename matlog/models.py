@@ -1,0 +1,203 @@
+"""The editable objects behind the Signals, Panels and Lines tabs."""
+import itertools
+import tkinter as tk
+
+# Fixed categorical order, validated for colourblind separation.
+PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100",
+           "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
+# Merged panels colour by run, so the dash pattern is what separates the signals.
+LINESTYLES = ["-", "--", ":", "-."]
+
+# What the Lines tab offers, as matplotlib line styles. "auto" leaves the choice to the view.
+LINE_STYLES = {"auto": None, "solid": "-", "dashed": "--", "dotted": ":", "dash-dot": "-."}
+
+HIDDEN = "hidden"
+_channel_ids = itertools.count()
+XLABEL_MODES = ["auto", "always", "never"]
+
+
+def parse_float(text, field):
+    try:
+        # A decimal comma is what a Norwegian keyboard types.
+        return float(text.replace(",", "."))
+    except ValueError:
+        raise ValueError(f"{field}: {text!r} is not a number")
+
+
+def parse_limit(text, field):
+    """An axis limit. Left blank, that end of the axis stays automatic."""
+    return parse_float(text, field) if text.strip() else None
+
+
+def palette_color(position):
+    return PALETTE[position % len(PALETTE)]
+
+
+def line_style(position):
+    return LINESTYLES[position % len(LINESTYLES)]
+
+
+class Channel:
+    """One signal: a matrix row, or an expression over the other signals."""
+
+    def __init__(self, name, color, index=None, expression="", unit="", panel="1"):
+        self.index = index
+        # Stable across renames and reorders, so a line's legend and style stay with it.
+        self.uid = next(_channel_ids)
+        self.name = tk.StringVar(value=name)
+        self.unit = tk.StringVar(value=unit)
+        self.expression = tk.StringVar(value=expression)
+        # What a file last called this signal. A name that differs was typed, and stays.
+        self.file_name = name
+        self.file_unit = unit
+        self.scale = tk.StringVar(value="1")
+        self.offset = tk.StringVar(value="0")
+        self.color = tk.StringVar(value=color)
+        self.panel = tk.StringVar(value=panel)
+        # The label panels were last told about, so a rename can find the titles to update.
+        self.shown_label = self.label()
+
+    @property
+    def derived(self):
+        return self.index is None
+
+    def display_name(self):
+        """The name, or what to call a signal nothing has named. The name itself stays empty."""
+        name = self.name.get().strip()
+        if name:
+            return name
+        return "Derived" if self.derived else f"Channel {self.index}"
+
+    def label(self):
+        unit = self.unit.get().strip()
+        return f"{self.display_name()}  [{unit}]" if unit else self.display_name()
+
+    def take_file_name(self, name, unit):
+        """Follow what a file calls this signal, unless the user has typed over it."""
+        if self.name.get() == self.file_name and self.name.get() != name:
+            self.name.set(name)
+        if self.unit.get() == self.file_unit and self.unit.get() != unit:
+            self.unit.set(unit)
+        self.file_name, self.file_unit = name, unit
+
+    def force_name(self, name, unit):
+        """A name chosen on purpose, such as a names file loaded by hand."""
+        self.file_name, self.file_unit = name, unit
+        self.name.set(name)
+        self.unit.set(unit)
+
+    def transform(self, raw):
+        scale = parse_float(self.scale.get(), f"{self.display_name()} scale")
+        offset = parse_float(self.offset.get(), f"{self.display_name()} offset")
+        return raw * scale + offset
+
+    def variables(self):
+        return (self.name, self.unit, self.expression, self.scale, self.offset,
+                self.color, self.panel)
+
+    def state(self):
+        return dict(index=self.index, name=self.name.get(), unit=self.unit.get(),
+                    expression=self.expression.get(), scale=self.scale.get(),
+                    offset=self.offset.get(), color=self.color.get(), panel=self.panel.get())
+
+    def restore(self, state):
+        self.index = state["index"]
+        for key in ("name", "unit", "expression", "scale", "offset", "color", "panel"):
+            getattr(self, key).set(state[key])
+        self.shown_label = self.label()
+
+
+class LineLook:
+    """The legend text, style, colour and visibility the user gave one plotted line.
+
+    The text starts as the automatic label and keeps following it until edited, so
+    renaming a signal still reaches legends nobody has touched.
+    """
+
+    def __init__(self, auto_label=None, label="", style="auto", color="", width=""):
+        self.auto_label = auto_label
+        self.label = tk.StringVar(value=auto_label if auto_label is not None else label)
+        self.style = tk.StringVar(value=style)
+        # Empty leaves the colour to the view, and the width to the figure.
+        self.color = tk.StringVar(value=color)
+        self.width = tk.StringVar(value=width)
+        self.shown = tk.BooleanVar(value=True)
+
+    def variables(self):
+        return (self.label, self.style, self.color, self.width, self.shown)
+
+    def edited(self):
+        return (self.label.get() != self.auto_label or self.style.get() != "auto"
+                or bool(self.color.get()) or bool(self.width.get().strip()))
+
+    def width_value(self):
+        """The line width in points, or None to use the figure's."""
+        text = self.width.get().strip()
+        if not text:
+            return None
+        field = f"{self.label.get() or self.auto_label or 'Line'} width"
+        width = parse_float(text, field)
+        if width <= 0:
+            raise ValueError(f"{field}: {text!r} must be above 0")
+        return width
+
+    def resolve(self, auto_label, auto_style, auto_color):
+        """(legend text, matplotlib style, colour) for this draw."""
+        # Writing only on a real change keeps the variable trace from redrawing forever.
+        if auto_label != self.auto_label and self.label.get() == self.auto_label:
+            self.label.set(auto_label)
+        self.auto_label = auto_label
+        return (self.label.get(), LINE_STYLES[self.style.get()] or auto_style,
+                self.color.get() or auto_color)
+
+    def reset(self):
+        self.label.set(self.auto_label or "")
+        self.style.set("auto")
+        self.color.set("")
+        self.width.set("")
+        self.shown.set(True)
+
+
+class Panel:
+    """One subplot and everything the user can set on it."""
+
+    def __init__(self, number):
+        self.number = number
+        self.title = tk.StringVar(value="")
+        self.ylabel = tk.StringVar(value="")
+        self.auto_y = tk.BooleanVar(value=True)
+        self.ymin = tk.StringVar(value="")
+        self.ymax = tk.StringVar(value="")
+        self.legend = tk.BooleanVar(value=False)
+        self.grid = tk.BooleanVar(value=True)
+        self.span = tk.BooleanVar(value=False)
+        self.xlabels = tk.StringVar(value="auto")
+        self.log_y = tk.BooleanVar(value=False)
+        # [run path, channel index] per line, for the custom layout only. Not saved with the
+        # settings: the runs are whatever the run list selects.
+        self.lines = []
+
+    def ymin_value(self):
+        return parse_limit(self.ymin.get(), f"Panel {self.number} y min")
+
+    def ymax_value(self):
+        return parse_limit(self.ymax.get(), f"Panel {self.number} y max")
+
+    def variables(self):
+        return (self.title, self.ylabel, self.auto_y, self.ymin, self.ymax,
+                self.legend, self.grid, self.span, self.xlabels, self.log_y)
+
+    def state(self):
+        return dict(title=self.title.get(), ylabel=self.ylabel.get(),
+                    auto_y=self.auto_y.get(), ymin=self.ymin.get(), ymax=self.ymax.get(),
+                    legend=self.legend.get(), grid=self.grid.get(), span=self.span.get(),
+                    xlabels=self.xlabels.get(), log_y=self.log_y.get())
+
+    def restore(self, state):
+        for key, var in (("title", self.title), ("ylabel", self.ylabel),
+                         ("ymin", self.ymin), ("ymax", self.ymax),
+                         ("xlabels", self.xlabels), ("auto_y", self.auto_y),
+                         ("legend", self.legend), ("grid", self.grid), ("span", self.span)):
+            var.set(state[key])
+        # Settings saved before y could be logarithmic have no "log_y".
+        self.log_y.set(state.get("log_y", False))
